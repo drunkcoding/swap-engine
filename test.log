@@ -1,0 +1,38 @@
+[I] Loading model: /mnt/xly/huggingface/gpt-neo-125M/model.onnx
+[I] ==== ONNX Model ====
+    Name: torch-jit-export | ONNX Opset: 12
+    
+    ---- 2 Graph Input(s) ----
+    {input_ids [dtype=int64, shape=('batch_size', 'sequence')],
+     attention_mask [dtype=int64, shape=('batch_size', 'sequence')]}
+    
+    ---- 25 Graph Output(s) ----
+    {logits [dtype=float32, shape=('batch_size', 'sequence', 'Reshapelogits_dim_2')],
+     298 [dtype=float32, shape=('Cast298_dim_0', 'Cast298_dim_1', 'Cast298_dim_2', 'Cast298_dim_3')],
+     296 [dtype=float32, shape=('Transpose296_dim_0', 'Transpose296_dim_1', 'Transpose296_dim_2', 'Transpose296_dim_3')],
+     445 [dtype=float32, shape=('Cast445_dim_0', 'Cast445_dim_1', 'Cast445_dim_2', 'Cast445_dim_3')],
+     443 [dtype=float32, shape=('Transpose443_dim_0', 'Transpose443_dim_1', 'Transpose443_dim_2', 'Transpose443_dim_3')],
+     592 [dtype=float32, shape=('Cast592_dim_0', 'Cast592_dim_1', 'Cast592_dim_2', 'Cast592_dim_3')],
+     590 [dtype=float32, shape=('Transpose590_dim_0', 'Transpose590_dim_1', 'Transpose590_dim_2', 'Transpose590_dim_3')],
+     739 [dtype=float32, shape=('Cast739_dim_0', 'Cast739_dim_1', 'Cast739_dim_2', 'Cast739_dim_3')],
+     737 [dtype=float32, shape=('Transpose737_dim_0', 'Transpose737_dim_1', 'Transpose737_dim_2', 'Transpose737_dim_3')],
+     886 [dtype=float32, shape=('Cast886_dim_0', 'Cast886_dim_1', 'Cast886_dim_2', 'Cast886_dim_3')],
+     884 [dtype=float32, shape=('Transpose884_dim_0', 'Transpose884_dim_1', 'Transpose884_dim_2', 'Transpose884_dim_3')],
+     1033 [dtype=float32, shape=('Cast1033_dim_0', 'Cast1033_dim_1', 'Cast1033_dim_2', 'Cast1033_dim_3')],
+     1031 [dtype=float32, shape=('Transpose1031_dim_0', 'Transpose1031_dim_1', 'Transpose1031_dim_2', 'Transpose1031_dim_3')],
+     1180 [dtype=float32, shape=('Cast1180_dim_0', 'Cast1180_dim_1', 'Cast1180_dim_2', 'Cast1180_dim_3')],
+     1178 [dtype=float32, shape=('Transpose1178_dim_0', 'Transpose1178_dim_1', 'Transpose1178_dim_2', 'Transpose1178_dim_3')],
+     1327 [dtype=float32, shape=('Cast1327_dim_0', 'Cast1327_dim_1', 'Cast1327_dim_2', 'Cast1327_dim_3')],
+     1325 [dtype=float32, shape=('Transpose1325_dim_0', 'Transpose1325_dim_1', 'Transpose1325_dim_2', 'Transpose1325_dim_3')],
+     1474 [dtype=float32, shape=('Cast1474_dim_0', 'Cast1474_dim_1', 'Cast1474_dim_2', 'Cast1474_dim_3')],
+     1472 [dtype=float32, shape=('Transpose1472_dim_0', 'Transpose1472_dim_1', 'Transpose1472_dim_2', 'Transpose1472_dim_3')],
+     1621 [dtype=float32, shape=('Cast1621_dim_0', 'Cast1621_dim_1', 'Cast1621_dim_2', 'Cast1621_dim_3')],
+     1619 [dtype=float32, shape=('Transpose1619_dim_0', 'Transpose1619_dim_1', 'Transpose1619_dim_2', 'Transpose1619_dim_3')],
+     1768 [dtype=float32, shape=('Cast1768_dim_0', 'Cast1768_dim_1', 'Cast1768_dim_2', 'Cast1768_dim_3')],
+     1766 [dtype=float32, shape=('Transpose1766_dim_0', 'Transpose1766_dim_1', 'Transpose1766_dim_2', 'Transpose1766_dim_3')],
+     1915 [dtype=float32, shape=('Cast1915_dim_0', 'Cast1915_dim_1', 'Cast1915_dim_2', 'Cast1915_dim_3')],
+     1913 [dtype=float32, shape=('Transpose1913_dim_0', 'Transpose1913_dim_1', 'Transpose1913_dim_2', 'Transpose1913_dim_3')]}
+    
+    ---- 309 Initializer(s) ----
+    
+    ---- 1495 Node(s) ----
