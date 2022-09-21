@@ -6,12 +6,12 @@ import torch.onnx
 from torch.utils.data import DataLoader
 
 from transformers import HfArgumentParser
-from transformers import ViTForImageClassification
+from transformers import ViTForImageClassification, ViTConfig
 import transformers
 
 from torchvision.datasets import ImageNet
 
-from baseline.pyutils.vit_images_preprocess import (
+from pyutils.vit_images_preprocess import (
     ViTFeatureExtractorTransforms,
     vit_collate_fn,
 )
@@ -26,6 +26,8 @@ class ModelArguments:
     )
     model_type: str = field(metadata={"help": "transformer model type"})
     dataset_path: str = field(metadata={"help": "Path to ImageNet dataset"})
+    cfg_only: bool = field(default=False, metadata={"help": "Only import config"})
+    cuda: bool = field(default=False, metadata={"help": "trace on gpu"})
 
 
 parser = HfArgumentParser((ModelArguments,))
@@ -49,17 +51,21 @@ if "vit" in args.model_type.lower():
 
 # prepare model
 if "vit" in args.model_type.lower():
-    model = transformers.AutoModelForImageClassification.from_pretrained(
-        args.model_path
-    )
+    if args.cfg_only:
+        config = ViTConfig.from_pretrained(args.model_path)
+        model = ViTForImageClassification(config)
+    else:
+        model = transformers.AutoModelForImageClassification.from_pretrained(
+            args.model_path
+        )
     model.eval()
-    model.cuda()
-
+    if args.cuda: model.cuda()
 
 # convert to onnx
 
 for dummy_input in dataloader:
-    dummy_input = dummy_input["pixel_values"].cuda()
+    dummy_input = dummy_input["pixel_values"]#.cuda()
+    if args.cuda: dummy_input = dummy_input.cuda()
     break
 torch.onnx.export(
     model,

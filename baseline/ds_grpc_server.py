@@ -10,7 +10,7 @@ import transformers
 from transformers import HfArgumentParser
 import torch
 from tqdm import tqdm
-
+import os
 import cProfile, pstats, io
 from pstats import SortKey
 import grpc
@@ -30,12 +30,12 @@ class DeepSpeedServicer(ModelInferenceServicer):
         if "vit" in args.model_type.lower():
             for model_path in args.model_paths:
                 model = transformers.AutoModelForImageClassification.from_pretrained(
-                    args.model_path
+                    model_path
                 )
                 model.eval()
-                model = model.cuda()
+                # model = model.cuda()
 
-                model = torch_ort.ORTModule(model)
+                # model = torch_ort.ORTModule(model)
 
                 model, _, _, _ = deepspeed.initialize(args, model)
                 model.eval()
@@ -44,6 +44,7 @@ class DeepSpeedServicer(ModelInferenceServicer):
 
         torch.cuda.empty_cache()
 
+    @torch.no_grad()
     def InferenceHandle(self, request, context):
 
         # TODO - add support for model name and version check
@@ -52,12 +53,11 @@ class DeepSpeedServicer(ModelInferenceServicer):
         inputs = {
             tensor_pb.name: torch.as_tensor(np.frombuffer(
                 tensor_pb.data, dtype=pb_to_numpy_dtype(tensor_pb.dtype)
-            ).reshape(tensor_pb.shape), device="cuda")
+            ).reshape(tensor_pb.shape), device="cuda").detach()
             for tensor_pb in request.input_data
         }
 
-        with torch.no_grad():
-            outputs = model(**inputs, return_dict=True)
+        outputs = model(**inputs, return_dict=True)
 
         # print(outputs)
 
@@ -91,7 +91,7 @@ class ServerArguments:
     )
 
     def __post_init__(self):
-        self.model_path = self.model_paths.split(",")
+        self.model_paths = self.model_paths.split(",")
 
 parser = HfArgumentParser((ServerArguments, ))
 args = parser.parse_args_into_dataclasses()[0]

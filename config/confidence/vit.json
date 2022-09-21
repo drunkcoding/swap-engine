@@ -1,0 +1,26 @@
+{
+    "vit-tiny-patch16-224": {
+        "threshold": 0.39,
+        "temperature": 1.0134
+    },
+    "vit-small-patch16-224": {
+        "threshold": 0.24,
+        "temperature": 1.0016
+    },
+    "vit-base-patch16-224": {
+        "threshold": 0.35,
+        "temperature": 1.0544
+    },
+    "vit-large-patch16-224": {
+        "threshold": 0.0,
+        "temperature": 1.0845
+    },
+    "ensembles": [
+        "vit-tiny-patch16-224",
+        "vit-small-patch16-224",
+        "vit-base-patch16-224",
+        "vit-large-patch16-224"
+    ],
+    "type": "vit",
+    "ensemble_weight": 0.6
+}
