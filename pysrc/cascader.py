@@ -1,22 +1,14 @@
+import copy
+from ctypes import Union
 from functools import wraps
 import time
 from typing import Dict
 import uuid
 import numpy as np
-from pysrc.connector import BaseConnector
+from pysrc.connector import BaseConnector, DeepspeedLocalConnector, TritonLocalConnector
 from scipy.special import softmax
-
-def timeit(func):
-    @wraps(func)
-    def timeit_wrapper(*args, **kwargs):
-        start_time = time.perf_counter()
-        result = func(*args, **kwargs)
-        end_time = time.perf_counter()
-        total_time = end_time - start_time
-        # first item in the args, ie `args[0]` is `self`
-        print(f'Function {func.__name__} Took {total_time:.4f} seconds')
-        return result
-    return timeit_wrapper
+from asgiref.sync import async_to_sync
+from pyutils.timer import timeit
 
 
 class CascadeHandler:
@@ -26,17 +18,17 @@ class CascadeHandler:
         self.num_ensembles = len(self.ensembles)
         self.ensemble_weight = config["ensemble_weight"]
 
-        self.confidence_params = []
+        self.model_meta = []
         for model_name in self.ensembles:
-            self.confidence_params.append(config[model_name])
+            self.model_meta.append(config[model_name])
 
         self.connector = connector
 
-    def _prepare_outputs(self):
+    def _prepare_outputs(self, output_name):
         if "vit" in self.ensembles[0]:
             logits = np.zeros((1, 1000), dtype=np.float32)
 
-        return {"logits": logits}
+        return {output_name: logits}
 
     @timeit
     def __call__(self, inputs: Dict[str, np.ndarray]):
@@ -54,18 +46,50 @@ class CascadeHandler:
 
             if np.any(local_mask):
 
-                outputs = self.connector.infer(model_name, inputs, self._prepare_outputs(), session_id)
-                outputs = outputs["logits"]
-                
-                extended_mask, max_prob = self.offload_mask(
-                    outputs, local_mask, idx
+                # if (
+                #     isinstance(self.connector, TritonLocalConnector)
+                #     and "ensemble" not in self.ensembles[idx]
+                # ):
+                #     for i in range(self.model_meta[idx]["npart"]):
+                #         cur_model_
+                # 
+                # name = model_name + f"_{i}"
+                #         # outputs = self.connector.get_model_outputs_as_numpy(cur_model_name)
+                #         # print(outputs)
+                #         outputs = {"output": None}
+
+                #         start_time = time.perf_counter()
+                #         outputs = self.connector.infer(
+                #             cur_model_name, inputs, outputs, session_id
+                #         )
+                #         # print(f"Time taken for connector inference: {time.perf_counter() - start_time}")
+                #         # print(outputs)
+                #         inputs = copy.deepcopy(outputs)
+                #         inputs["input"] = inputs["output"]
+                #         del inputs["output"]
+                if isinstance(self.connector, TritonLocalConnector):
+                    outputs = self._prepare_outputs("ouput")
+                    outputs = async_to_sync(
+                        self.connector.infer(model_name, inputs, outputs, session_id)
+                    )
+                else:
+                    outputs = self._prepare_outputs("logits")
+                    outputs = async_to_sync(
+                        self.connector.infer(model_name, inputs, outputs, session_id)
+                    )
+
+                # print(outputs)
+                outputs = outputs["output"]
+
+                extended_mask, max_prob = self.offload_mask(outputs, local_mask, idx)
+                ensemble_outputs = self.model_ensemble(
+                    ensemble_outputs, outputs, local_mask, idx
                 )
-                ensemble_outputs = self.model_ensemble(ensemble_outputs, outputs, local_mask, idx)
 
                 num_next_models = self.num_ensembles - idx - 1
                 if np.any(extended_mask) and num_next_models > 0:
                     batch_mask[idx] &= ~extended_mask
-                    batch_mask[idx+1] |= extended_mask
+                    batch_mask[idx + 1] |= extended_mask
                     # batch_mask = self.update_batch_mask(
                     #     max_prob, batch_mask.copy(), extended_mask, idx
                     # )
@@ -80,7 +104,7 @@ class CascadeHandler:
     def offload_mask(self, logits, mask, idx):
         probabilities = np.power(softmax(logits), 2)
         max_prob = np.max(probabilities, axis=-1)
-        prob_mask = max_prob < self.confidence_params[idx]["threshold"]
+        prob_mask = max_prob < self.model_meta[idx]["threshold"]
         extended_mask = mask & prob_mask
         return extended_mask, max_prob
 

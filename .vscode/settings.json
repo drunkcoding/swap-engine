@@ -57,5 +57,6 @@
         "cinttypes": "cpp",
         "typeinfo": "cpp",
         "__nullptr": "cpp"
-    }
+    },
+    "python.formatting.provider": "black"
 }

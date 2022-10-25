@@ -1,25 +1,36 @@
 {
     "vit-tiny-patch16-224": {
         "threshold": 0.39,
-        "temperature": 1.0134
+        "temperature": 1.0134,
+        "npart": 26
     },
     "vit-small-patch16-224": {
         "threshold": 0.24,
-        "temperature": 1.0016
+        "temperature": 1.0016,
+        "npart": 26
     },
     "vit-base-patch16-224": {
         "threshold": 0.35,
-        "temperature": 1.0544
+        "temperature": 1.0544,
+        "npart": 26
+    },
+    "vit-huge-patch16-224": {
+        "threshold": 0.35,
+        "temperature": 1.0544,
+        "npart": 66
+    },
+    "vit-xl-patch16-224": {
+        "threshold": 0.0,
+        "temperature": 1.0544,
+        "npart": 50
     },
     "vit-large-patch16-224": {
-        "threshold": 0.0,
-        "temperature": 1.0845
+        "threshold": 0.34,
+        "temperature": 1.0845,
+        "npart": 50
     },
     "ensembles": [
-        "vit-tiny-patch16-224",
-        "vit-small-patch16-224",
-        "vit-base-patch16-224",
-        "vit-large-patch16-224"
+        "vit-xl-patch16-224"
     ],
     "type": "vit",
     "ensemble_weight": 0.6

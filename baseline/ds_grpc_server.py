@@ -6,8 +6,7 @@ from typing import Optional
 from urllib import response
 import torch_ort
 import deepspeed
-import transformers 
-from transformers import HfArgumentParser
+from transformers import HfArgumentParser, ViTConfig, ViTForImageClassification
 import torch
 from tqdm import tqdm
 import os
@@ -21,6 +20,8 @@ from protos.message_pb2_grpc import ModelInferenceServicer
 import protos.message_pb2 as message_pb2
 from protos import message_pb2_grpc
 
+torch.manual_seed(0)
+
 class DeepSpeedServicer(ModelInferenceServicer):
     def __init__(self, args):
         self.args = args
@@ -29,9 +30,13 @@ class DeepSpeedServicer(ModelInferenceServicer):
 
         if "vit" in args.model_type.lower():
             for model_path in args.model_paths:
-                model = transformers.AutoModelForImageClassification.from_pretrained(
-                    model_path
-                )
+                if args.cfg_only:
+                    config = ViTConfig.from_pretrained(model_path)
+                    model = ViTForImageClassification(config)
+                else:
+                    model = ViTForImageClassification.from_pretrained(
+                        model_path
+                    )
                 model.eval()
                 # model = model.cuda()
 
@@ -86,6 +91,7 @@ class ServerArguments:
         default=None,
         metadata={"help": "Path to deepspeed json config file"},
     )
+    cfg_only: bool = field(default=False, metadata={"help": "Only import config"})
     local_rank: int = field(
         default=-1, metadata={"help": "For distributed training: local_rank"}
     )

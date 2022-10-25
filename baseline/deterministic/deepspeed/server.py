@@ -1,13 +1,14 @@
 from calendar import c
 from dataclasses import dataclass, field
 from email import parser
+import os
 import numpy as np
 from typing import Optional
 from urllib import response
 import torch_ort
 import deepspeed
-import transformers 
-from transformers import HfArgumentParser
+import transformers
+from transformers import HfArgumentParser, ViTConfig, ViTForImageClassification
 import torch
 from tqdm import tqdm
 
@@ -21,6 +22,7 @@ from protos.message_pb2_grpc import ModelInferenceServicer
 import protos.message_pb2 as message_pb2
 from protos import message_pb2_grpc
 
+
 class DeepSpeedServicer(ModelInferenceServicer):
     def __init__(self, args):
         self.args = args
@@ -29,11 +31,12 @@ class DeepSpeedServicer(ModelInferenceServicer):
 
         if "vit" in args.model_type.lower():
             for model_path in args.model_paths:
-                model = transformers.AutoModelForImageClassification.from_pretrained(
-                    args.model_path
-                )
+                if args.cfg_only:
+                    config = ViTConfig.from_pretrained(model_path)
+                    model = ViTForImageClassification(config)
+                else:
+                    model = ViTForImageClassification.from_pretrained(model_path)
                 model.eval()
-                model = model.cuda()
 
                 model = torch_ort.ORTModule(model)
 
@@ -47,12 +50,18 @@ class DeepSpeedServicer(ModelInferenceServicer):
     def InferenceHandle(self, request, context):
 
         # TODO - add support for model name and version check
-        model = self.model_dict[request.model_name]
+        model_name = request.model_name
+        model_version = request.model_version
 
+        model = self.model_dict[model_name]
+        
         inputs = {
-            tensor_pb.name: torch.as_tensor(np.frombuffer(
-                tensor_pb.data, dtype=pb_to_numpy_dtype(tensor_pb.dtype)
-            ).reshape(tensor_pb.shape), device="cuda")
+            tensor_pb.name: torch.as_tensor(
+                np.frombuffer(
+                    tensor_pb.data, dtype=pb_to_numpy_dtype(tensor_pb.dtype)
+                ).reshape(tensor_pb.shape),
+                device="cuda",
+            )
             for tensor_pb in request.input_data
         }
 
@@ -74,6 +83,7 @@ class DeepSpeedServicer(ModelInferenceServicer):
 
         return response
 
+
 @dataclass
 class ServerArguments:
     model_paths: str = field(
@@ -86,22 +96,28 @@ class ServerArguments:
         default=None,
         metadata={"help": "Path to deepspeed json config file"},
     )
+    cfg_only: bool = field(default=False, metadata={"help": "Only import config"})
     local_rank: int = field(
         default=-1, metadata={"help": "For distributed training: local_rank"}
     )
 
     def __post_init__(self):
-        self.model_path = self.model_paths.split(",")
+        self.model_paths = self.model_paths.split(",")
 
-parser = HfArgumentParser((ServerArguments, ))
+
+parser = HfArgumentParser((ServerArguments,))
 args = parser.parse_args_into_dataclasses()[0]
+
 
 def serve():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    message_pb2_grpc.add_ModelInferenceServicer_to_server(DeepSpeedServicer(args), server)
+    message_pb2_grpc.add_ModelInferenceServicer_to_server(
+        DeepSpeedServicer(args), server
+    )
     server.add_insecure_port("[::]:50051")
     server.start()
     server.wait_for_termination()
+
 
 serve()
 
@@ -126,7 +142,7 @@ serve()
 
 #         if input_ids.size(1) != max_length:
 #             continue
-        
+
 #         yield input_ids, target_ids, trg_len, end_loc
 
 # deepspeed.init_distributed()
