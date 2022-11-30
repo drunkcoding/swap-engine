@@ -1,6 +1,7 @@
 build
 docker/*backend*
 profile
+flaxformer/
 # Prerequisites
 *.d
 
@@ -195,4 +196,5 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-model_repository/
+*model_repo*/
+*.png

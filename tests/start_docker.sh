@@ -1,13 +1,18 @@
-docker run --gpus=1 \
-    --name triton_custom \
+docker stop tritonserver_custom
+docker rm tritonserver_custom
+docker run --privileged --gpus=1 \
+    --name tritonserver_custom \
+    --shm-size=10gb \
     -d --net=host \
-    -v ${PWD}/model_repository:/models \
-    -v ${HOME}/pytorch_backend/build/install/backends:/opt/tritonserver/backends/ \
+    -v ${PWD}/model_repo_t5x:/models \
+    -v ${HOME}/pytorch_backend/build/install/backends/pytorch:/opt/tritonserver/backends/pytorch \
+    -v ${HOME}/muduo/build/lib:/root/lib \
     tritonserver_custom \
     tritonserver --model-repository=/models \
-        --exit-on-error false \
+        --exit-on-error true \
         --model-control-mode explicit \
-        --load-model=* 
+        --load-model=* \
+        --log-verbose 10
 
 # docker cp ${HOME}/pytorch_backend/build/install/backends triton_custom:/opt/tritonserver/backends/
 

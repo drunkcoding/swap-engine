@@ -184,6 +184,45 @@ class ViTAfterAttentionPipe(nn.Module):
 
         return layer_output
 
+from moe import MoE
+
+class ViTSelfOutput(nn.Module):
+    """
+    The residual connection is defined in ViTLayer instead of here (as is the case with other models), due to the
+    layernorm applied before each block.
+    """
+
+    def __init__(self, config: ViTConfig, use_moe: bool = False) -> None:
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        # if use_moe:
+        #     self.dense = MoE(config.hidden_size, config.hidden_size, config.num_experts, config.expert_capacity)
+        # else:
+        #     self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(
+        self, hidden_states: torch.Tensor, input_tensor: torch.Tensor
+    ) -> torch.Tensor:
+
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+
+        return hidden_states
+
+class ViTMoEBlock(nn.Module):
+    def __init__(self, config: ViTConfig):
+        super().__init__()
+        self.num_experts = config.num_experts
+        self.expert = nn.Linear(config.hidden_size, config.hidden_size)
+        self.gate = nn.Linear(config.hidden_size, self.num_experts)
+
+    def forward(self, hidden_states):
+        expert_out = self.expert(hidden_states)
+        gate_out = self.gate(hidden_states)
+        gate_out = torch.softmax(gate_out, dim=1)
+        expert_out = expert_out * gate_out
+        return expert_out
 
 # class ViTIntermediatePipe(nn.Module):
 #     def __init__(self, config: ViTConfig):

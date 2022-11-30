@@ -73,7 +73,7 @@ torch.random.manual_seed(0)
 dataloader = DataLoader(
     dataset,
     batch_size=1,
-    shuffle=True,
+    shuffle=False,
     num_workers=0,
     collate_fn=vit_collate_fn,
 )

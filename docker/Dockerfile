@@ -1,5 +1,9 @@
 FROM nvcr.io/nvidia/tritonserver:22.08-py3
 
-# Copy the custom onnxruntime to the container
-COPY onnxruntime_backend/backends/onnxruntime/libtriton_onnxruntime.so /opt/tritonserver/backends/onnxruntime/libtriton_onnxruntime.so
-COPY pytorch_backend/backends/pytorch/libtriton_pytorch.so /opt/tritonserver/backends/pytorch/libtriton_pytorch.so
+RUN apt update
+RUN apt install -y libevent-dev libaio-dev
+
+ENV CUDA_LAUNCH_BLOCKING=1
+ENV LD_LIBRARY_PATH=LD_LIBRARY_PATH:/root/lib
+
+RUN pip install tritonclient[all]

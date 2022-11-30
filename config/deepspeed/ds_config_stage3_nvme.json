@@ -1,0 +1,21 @@
+{
+    "zero_optimization": {
+        "stage": 3,
+        "contiguous_gradients": true,
+        "stage3_max_live_parameters": 1e9,
+        "stage3_max_reuse_distance": 1e9,
+        "stage3_prefetch_bucket_size": 1e8,
+        "stage3_param_persistence_threshold": 1e7,
+        "reduce_bucket_size": 1e8,
+        "sub_group_size": 1e9,
+        "offload_optimizer": {
+            "device": "cpu"
+         },
+        "offload_param": {
+            "device": "nvme",
+            "pin_memory": true,
+            "nvme_path": "/mnt/xly/deepspeed"
+       }
+   },
+   "train_batch_size": 32
+}
