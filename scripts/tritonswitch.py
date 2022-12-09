@@ -10,7 +10,7 @@ def make_dir_if_not_exists(path):
 
 
 CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
-MODEL_REPOSITORY = "model_repository"
+MODEL_REPOSITORY = "model_repo_t5x"
 MODEL_NAME = "t5x-base-e128"
 
 
@@ -131,18 +131,20 @@ export_torchscript_model(
 )
 
 
+# ,
+#         {
+#         name: "routes"
+#         data_type: TYPE_INT64
+#         dims: [ -1 ]
+#         }
+
 CONFIG_EXPERT = """
     %s
     input [
         {
         name: "hidden_states"
         data_type: TYPE_FP32
-        dims: [ -1, -1, -1 ]
-        },
-        {
-        name: "routes"
-        data_type: TYPE_INT64
-        dims: [ -1 ]
+        dims: [ -1, -1 ]
         }
     ]
     output [

@@ -92,6 +92,9 @@ class TritonPythonModel:
         self.client = grpcclient.InferenceServerClient(
             url="localhost:8001", verbose=False
         )
+    
+    def dummy_callback(self, result, error):
+        pass
 
     def execute(self, requests):
         responses = []
@@ -115,7 +118,8 @@ class TritonPythonModel:
             
             expert_outputs = [None] * self.num_experts
             model_name = f"expert-{self.layer_name}-{self.layer_idx}"
-            sequence_id = hash(model_name)
+            sequence_id = request.correlation_id()
+            request_id = request.request_id()
             for i in range(self.num_experts):
                 indexes_list = np.flatnonzero(routes == i)
                 if len(indexes_list) > 0:
@@ -124,14 +128,16 @@ class TritonPythonModel:
                     ]
                     # print("token_features", token_features, flush=True)
                     token_features = self.prepare_input("hidden_states", token_features)
+                    # expert_routes = self.prepare_input("routes", routes)
                     output = self.prepare_output("hidden_states")
                     # print("output", output, flush=True)
                     expert_outputs[i] = self.client.async_infer(
-                        f"{self.backend_name}_{self.layer_name}_expert_{self.layer_idx}_i",
+                        f"{self.backend_name}_{self.layer_name}_expert_{self.layer_idx}_{i}",
                         [token_features],
-                        [output],
-                        request_id=request.request_id(),
-                        sequence_id=sequence_id,
+                        self.dummy_callback,
+                        outputs=[output],
+                        request_id=request_id,
+                        sequence_id=(sequence_id & 0xFFFFFFFF) | ((i+1) << 32),
                     )
 
             final_output = np.zeros_like(hidden_states).reshape((batch_size * seq_len, d_model))

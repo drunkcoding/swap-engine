@@ -15,7 +15,7 @@ class SwitchConfig(T5Config):
         "num_hidden_layers": "num_layers",
         "mlp_dim": "d_expert",
     }
-    dense_act_fn = "gelu"
+    dense_act_fn = "relu"
 
     def __init__(self, **kwargs):
         

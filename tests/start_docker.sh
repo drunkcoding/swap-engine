@@ -6,10 +6,12 @@ docker run --privileged --gpus=1 \
     -d --net=host \
     -v ${PWD}/model_repo_t5x:/models \
     -v ${HOME}/pytorch_backend/build/install/backends/pytorch:/opt/tritonserver/backends/pytorch \
+    -v ${HOME}/core/build/install/lib:/opt/tritonserver/lib \
     -v ${HOME}/muduo/build/lib:/root/lib \
     tritonserver_custom \
     tritonserver --model-repository=/models \
         --exit-on-error true \
+        --allow-metrics false \
         --model-control-mode explicit \
         --load-model=* \
         --log-verbose 10

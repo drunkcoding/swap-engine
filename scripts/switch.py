@@ -838,9 +838,10 @@ def evaluate(
     ):
         # print("train_state", train_state.state_dict()["target"])
         flax_state = train_state.state_dict()["target"]
+        print(flax_state["decoder"].keys())
         # copy_model_weights(flax_state)
-        copy_ds_weights(flax_state)
-        continue
+        # copy_ds_weights(flax_state)
+        exit()
         # ----------------------------------------------------------------------------
         # Main evaluation loop
         # ----------------------------------------------------------------------------

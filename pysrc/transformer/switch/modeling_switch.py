@@ -3,6 +3,7 @@ from transformers.generation_utils import GenerationMixin
 from transformers.modeling_utils import ModuleUtilsMixin
 import torch.nn as nn
 import torch
+import torch.nn.functional as F
 import math
 import copy
 
@@ -137,25 +138,32 @@ class SwitchExpert(nn.Module):
         self.dropout = nn.Dropout(config.dropout_rate)
         self.act = ACT2FN[config.dense_act_fn]
 
-    def forward(self, hidden_states, routes):
-        indexes_list = torch.nonzero(routes == self.expert_num).flatten()
-        if len(indexes_list) == 0:
-            return torch.ones_like(hidden_states[..., 0])
-
-        token_features = hidden_states.reshape(-1, hidden_states.shape[-1])[
-            indexes_list
-        ]
-        # token_features = super().forward(token_features)
-
-        token_features = self.wi(token_features)
+    def forward(self, hidden_states):
+        token_features = self.wi(hidden_states)
         token_features = self.act(token_features)
         token_features = self.dropout(token_features)
         token_features = self.wo(token_features)
-
-        # hidden_states.view(-1, hidden_states.shape[-1])[indexes_list] = token_features
-        # return hidden_states
-        # print(token_features.shape)
         return token_features
+
+    # def forward(self, hidden_states, routes):
+    #     indexes_list = torch.nonzero(routes == self.expert_num).flatten()
+    #     if len(indexes_list) == 0:
+    #         return torch.ones_like(hidden_states[..., 0])
+
+    #     token_features = hidden_states.reshape(-1, hidden_states.shape[-1])[
+    #         indexes_list
+    #     ]
+    #     # token_features = super().forward(token_features)
+
+    #     token_features = self.wi(token_features)
+    #     token_features = self.act(token_features)
+    #     token_features = self.dropout(token_features)
+    #     token_features = self.wo(token_features)
+
+    #     # hidden_states.view(-1, hidden_states.shape[-1])[indexes_list] = token_features
+    #     # return hidden_states
+    #     # print(token_features.shape)
+    #     return token_features
 
         # token_features = hidden_states.view(-1, hidden_states.shape[-1])[
         #     indexes_list[self.expert_num], ...
@@ -447,7 +455,12 @@ class SwitchRouter(nn.Module):
     def forward(self, hidden_states):
         hidden_states = self.layer_norm(hidden_states)
         # print(hidden_states.shape)
-        # batch_size, seq_len, _ = hidden_states.shape
+        batch_size, seq_len, _ = hidden_states.shape
+
+        num_tokens = batch_size * seq_len
+        capacity = torch.ceil(torch.tensor(num_tokens / self.n_experts) * self.capacity_factor).to(
+            torch.long
+        )
 
         # Flatten the sequence and batch dimensions
         hidden_states = hidden_states.view(-1, self.hidden_size)
@@ -463,9 +476,17 @@ class SwitchRouter(nn.Module):
         # We route to the expert with highest probability
         route_prob_max, routes = torch.max(route_prob, dim=-1)
         # print(route_prob_max.shape, routes.shape)
-        # print(routes)
+        print(routes)
         routes = routes.long()
 
+        # expert_mask = F.one_hot(routes, self.n_experts).long()
+        # print(expert_mask)
+
+        # token_priority = torch.cumsum(expert_mask, dim=1) * expert_mask - 1.0
+        # token_priority = torch.max(token_priority, dim=-1)
+
+        # print(token_priority)
+        # exit()
         return routes, route_prob_max
 
         # # Get indexes of tokens going to each expert
@@ -1405,4 +1426,3 @@ class SwitchModel(nn.Module):
             k += 1
 
         return decoder_hidden_states
-
