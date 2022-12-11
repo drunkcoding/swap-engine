@@ -118,7 +118,7 @@ class TritonPythonModel:
             sequence_id = request.correlation_id()
             request_id = request.request_id()
             for i in range(self.num_experts):
-                indexes_list = routes[:, :, idx].astype(bool)
+                indexes_list = routes[:, :, i].astype(bool)
                 if np.any(indexes_list):
                     token_features = hidden_states[indexes_list]
                     # print("token_features", token_features, flush=True)
@@ -135,7 +135,7 @@ class TritonPythonModel:
                         sequence_id=(sequence_id & 0xFFFFFFFF) | ((i+1) << 32),
                     )
 
-            final_output = hidden_states.clone()
+            final_output = hidden_states.copy()
             for i in range(self.num_experts):
                 if expert_outputs[i] is not None:
                     output = expert_outputs[i].get_result()

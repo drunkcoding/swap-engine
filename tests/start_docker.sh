@@ -13,7 +13,7 @@ docker run --privileged --gpus='"device=0"' \
         --exit-on-error true \
         --allow-metrics false \
         --model-control-mode explicit \
-        --load-model=switch-base-8-ensemble \
+        --load-model=* \
         --log-verbose 10
 
 # docker cp ${HOME}/pytorch_backend/build/install/backends triton_custom:/opt/tritonserver/backends/
