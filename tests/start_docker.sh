@@ -1,10 +1,10 @@
 docker stop tritonserver_custom
 docker rm tritonserver_custom
-docker run --privileged --gpus=1 \
+docker run --privileged --gpus='"device=0"' \
     --name tritonserver_custom \
     --shm-size=10gb \
     -d --net=host \
-    -v ${PWD}/model_repo_t5x:/models \
+    -v ${PWD}/model_repo_switch-base-8:/models \
     -v ${HOME}/pytorch_backend/build/install/backends/pytorch:/opt/tritonserver/backends/pytorch \
     -v ${HOME}/core/build/install/lib:/opt/tritonserver/lib \
     -v ${HOME}/muduo/build/lib:/root/lib \
@@ -13,7 +13,7 @@ docker run --privileged --gpus=1 \
         --exit-on-error true \
         --allow-metrics false \
         --model-control-mode explicit \
-        --load-model=* \
+        --load-model=switch-base-8-ensemble \
         --log-verbose 10
 
 # docker cp ${HOME}/pytorch_backend/build/install/backends triton_custom:/opt/tritonserver/backends/

@@ -1,12 +1,12 @@
 import os
 from typing import Union
-from pysrc.transformer.switch.configuration_switch import SwitchConfig
+from transformers import SwitchTransformersConfig
 
-MODEL_NAME = "t5x-base-e128"
-CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
-MODEL_REPOSITORY = "model_repository"
+MODEL_NAME = "switch-base-8"
+# CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
+MODEL_REPOSITORY = "model_repo_switch-base-8"
 
-config = SwitchConfig.from_pretrained("config/t5x/base")
+config = SwitchTransformersConfig.from_pretrained(f"google/{MODEL_NAME}")
 
 def generate_expert_layers(i, num_experts, layer: str):
     layer_cofig = []
@@ -164,6 +164,30 @@ def generate_final_layer(layer: str):
             layer,
             "%s_hidden_states_%d" % (layer, config.num_layers),
             "%s_hidden_states" % layer,
+        )
+    )
+    return layer_cofig
+
+def generate_lm_head():
+    layer_cofig = []
+    layer_cofig.append(
+        """
+        {
+            model_name: "%s_lm_head"
+            input_map {
+                key: "hidden_states"
+                value: "%s"
+            }
+            output_map {
+                key: "hidden_states"
+                value: "%s"
+            }
+        } 
+        """
+        % (
+            MODEL_NAME,
+            "decoder_hidden_states",
+            "logits",
         )
     )
     return layer_cofig
@@ -368,226 +392,7 @@ for i in range(config.num_layers):
 
 ensemble_steps += generate_final_layer("decoder")
 
-# for i in range(config.num_layers):
-#     ensemble_steps.append(
-#         """
-#             {
-#                 model_name: "%s_decoder_block_%d"
-#                 input_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "encoder_hidden_states"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "decoder_position_bias"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "encoder_decoder_position_bias"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "encoder_extended_attention_mask"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "decoder_extended_attention_mask"
-#                     value: "%s"
-#                 }
-#                 output_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#                 output_map {
-#                     key: "decoder_position_bias"
-#                     value: "%s"
-#                 }
-#                 output_map {
-#                     key: "encoder_decoder_position_bias"
-#                     value: "%s"
-#                 }
-#             }
-#         """
-#         % (
-#             MODEL_NAME,
-#             i,
-#             "decoder_hidden_states_%d" % i,
-#             "encoder_hidden_states",
-#             "decoder_position_bias_%d" % i,
-#             "encoder_position_bias_%d" % (config.num_layers + i),
-#             "encoder_extended_attention_mask",
-#             "extended_decoder_attention_mask",
-#             "decoder_hidden_states_block_%d" % i,
-#             "decoder_position_bias_%d" % (i + 1),
-#             "encoder_position_bias_%d" % (config.num_layers + i + 1),
-#         )
-#     )
-#     if i % 2 == 1:
-#         ensemble_steps.append(
-#             """
-#             {
-#                 model_name: "%s_decoder_router_%d"
-#                 input_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#                 output_map {
-#                     key: "routes"
-#                     value: "%s"
-#                 }
-#                 output_map {
-#                     key: "route_prob_max"
-#                     value: "%s"
-#                 }
-#             }
-#             """
-#             % (
-#                 MODEL_NAME,
-#                 i,
-#                 "decoder_hidden_states_block_%d" % i,
-#                 "decoder_routes_%d" % i,
-#                 "decoder_route_prob_max_%d" % i,
-#             )
-#         )
-#         for k in range(config.num_experts):
-#             ensemble_steps.append(
-#                 """
-#                 {
-#                     model_name: "%s_decoder_expert_%d_%d"
-#                     input_map {
-#                         key: "decoder_hidden_states"
-#                         value: "%s"
-#                     }
-#                     input_map {
-#                         key: "routes"
-#                         value: "%s"
-#                     }
-#                     output_map {
-#                         key: "decoder_hidden_states"
-#                         value: "%s"
-#                     }
-#                 }
-#                 """
-#                 % (
-#                     MODEL_NAME,
-#                     i,
-#                     k,
-#                     "decoder_hidden_states_block_%d" % i,
-#                     "decoder_routes_%d" % i,
-#                     "decoder_expert_%d_%d" % (i, k),
-#                 )
-#             )
-#         ensemble_steps.append(
-#             """
-#             {
-#                 model_name: "%s_decoder_preagg_%d"
-#                 %s
-#                 output_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#             }
-#             """
-#             % (
-#                 MODEL_NAME,
-#                 i,
-#                 "\n".join(
-#                     [
-#                         """
-#                         input_map {
-#                             key: "expert_output_%d"
-#                             value: "%s"
-#                         }
-#                         """
-#                         % (k, "decoder_expert_%d_%d" % (i, k))
-#                         for k in range(config.num_experts)
-#                     ]
-#                 ),
-#                 "decoder_hidden_states_agg_%d" % i,
-#             )
-#         )
-#         ensemble_steps.append(
-#             """
-#             {
-#                 model_name: "%s_decoder_aggregator_%d"
-#                 input_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "expert_output"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "routes"
-#                     value: "%s"
-#                 }
-#                 input_map {
-#                     key: "route_prob_max"
-#                     value: "%s"
-#                 }
-#                 output_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#             }
-#             """
-#             % (
-#                 MODEL_NAME,
-#                 i,
-#                 "decoder_hidden_states_agg_%d" % i,
-#                 "decoder_expert_%d_all" % i,
-#                 "decoder_routes_%d" % i,
-#                 "decoder_route_prob_max_%d" % i,
-#                 "decoder_hidden_states_%d" % (i + 1),
-#             )
-#         )
-#     else:
-#         ensemble_steps.append(
-#             """
-#             {
-#                 model_name: "%s_decoder_ff_%d"
-#                 input_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#                 output_map {
-#                     key: "decoder_hidden_states"
-#                     value: "%s"
-#                 }
-#             }
-#             """
-#             % (
-#                 MODEL_NAME,
-#                 i,
-#                 "decoder_hidden_states_block_%d" % i,
-#                 "decoder_hidden_states_%d" % (i + 1),
-#             )
-#         )
-
-# ensemble_steps.append(
-#     """
-#     {
-#         model_name: "%s_decoder_final"
-#         input_map {
-#             key: "decoder_hidden_states"
-#             value: "%s"
-#         }
-#         output_map {
-#             key: "decoder_hidden_states"
-#             value: "%s"
-#         }
-#     }
-#     """
-#     % (
-#         MODEL_NAME,
-#         "decoder_hidden_states_%d" % config.num_layers,
-#         "decoder_hidden_states",
-#     )
-# )
+ensemble_steps += generate_lm_head()
 
 
 CONFIG_ENSEMBLE = """
@@ -617,7 +422,7 @@ input [
 ]
 output [
     {
-    name: "decoder_hidden_states"
+    name: "logits"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1 ]
     },
@@ -643,19 +448,6 @@ ensemble_scheduling {
     config.num_layers,
     ",\n".join(ensemble_steps),
 )
-
-# ,
-#     {
-#         name: "decoder_input_ids"
-#         data_type: TYPE_INT32
-#         dims: [ -1, -1 ]
-#     },
-#     {
-#         name: "decoder_attention_mask"
-#         data_type: TYPE_INT32
-#         dims: [ -1, -1 ]
-#     }
-
 
 def make_dir_if_not_exists(path):
     if not os.path.exists(path):

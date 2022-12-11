@@ -1,26 +1,14 @@
-from typing import Callable, List
-from transformers.generation_utils import GenerationMixin
-from transformers.modeling_utils import ModuleUtilsMixin
-import torch.nn as nn
-import torch
-import torch.nn.functional as F
 import math
-import copy
-
-from transformers.activations import ACT2FN
-from .configuration_switch import SwitchConfig
-
-
-def prepare_decoder_input_ids_for_generation(
-    batch_size: int,
-    decoder_start_token_id: int,
-    device: torch.device,
-) -> torch.LongTensor:
-    decoder_input_ids = (
-        torch.ones((batch_size, 1), dtype=torch.long, device=device)
-        * decoder_start_token_id
-    )
-    return decoder_input_ids
+from typing import Callable, List, Tuple
+import torch.nn as nn
+from transformers import SwitchTransformersConfig
+from transformers.models.switch_transformers.modeling_switch_transformers import (
+    SwitchTransformersLayerNorm,
+    SwitchTransformersDenseActDense,
+    SwitchTransformersLayerCrossAttention,
+    SwitchTransformersLayerSelfAttention,
+)
+import torch
 
 
 def invert_attention_mask(encoder_attention_mask: torch.Tensor) -> torch.Tensor:
@@ -49,7 +37,6 @@ def invert_attention_mask(encoder_attention_mask: torch.Tensor) -> torch.Tensor:
 def get_extended_attention_mask(
     attention_mask: torch.Tensor,
     input_shape: List[int],
-    device: torch.device,
     is_decoder: bool = False,
 ) -> torch.Tensor:
     """
@@ -68,6 +55,7 @@ def get_extended_attention_mask(
     """
     # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
     # ourselves in which case we just need to make it broadcastable to all heads.
+    device = attention_mask.device
     if attention_mask.dim() == 3:
         extended_attention_mask = attention_mask[:, None, :, :]
     elif attention_mask.dim() == 2:
@@ -113,85 +101,29 @@ def get_extended_attention_mask(
     return extended_attention_mask
 
 
-class T5DenseActDense(nn.Module):
-    def __init__(self, config: SwitchConfig):
-        super().__init__()
-        self.wi = nn.Linear(config.d_model, config.d_ff, bias=False)
-        self.wo = nn.Linear(config.d_ff, config.d_model, bias=False)
-        self.dropout = nn.Dropout(config.dropout_rate)
-        self.act = ACT2FN[config.dense_act_fn]
-
-    def forward(self, hidden_states):
-        hidden_states = self.wi(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.wo(hidden_states)
-        return hidden_states
-
-
-class SwitchExpert(nn.Module):
-    def __init__(self, config: SwitchConfig):
-        super().__init__()
-        # self.expert_num = expert_num
-        self.wi = nn.Linear(config.d_model, config.d_ff, bias=False)
-        self.wo = nn.Linear(config.d_ff, config.d_model, bias=False)
-        self.dropout = nn.Dropout(config.dropout_rate)
-        self.act = ACT2FN[config.dense_act_fn]
-
-    def forward(self, hidden_states):
-        token_features = self.wi(hidden_states)
-        token_features = self.act(token_features)
-        token_features = self.dropout(token_features)
-        token_features = self.wo(token_features)
-        return token_features
-
-    # def forward(self, hidden_states, routes):
-    #     indexes_list = torch.nonzero(routes == self.expert_num).flatten()
-    #     if len(indexes_list) == 0:
-    #         return torch.ones_like(hidden_states[..., 0])
-
-    #     token_features = hidden_states.reshape(-1, hidden_states.shape[-1])[
-    #         indexes_list
-    #     ]
-    #     # token_features = super().forward(token_features)
-
-    #     token_features = self.wi(token_features)
-    #     token_features = self.act(token_features)
-    #     token_features = self.dropout(token_features)
-    #     token_features = self.wo(token_features)
-
-    #     # hidden_states.view(-1, hidden_states.shape[-1])[indexes_list] = token_features
-    #     # return hidden_states
-    #     # print(token_features.shape)
-    #     return token_features
-
-        # token_features = hidden_states.view(-1, hidden_states.shape[-1])[
-        #     indexes_list[self.expert_num], ...
-        # ]
-
-
 class EncoderTokenEmbeddings(nn.Module):
-    def __init__(self, config: SwitchConfig) -> None:
+    def __init__(self, config: SwitchTransformersConfig) -> None:
         super().__init__()
 
         self.num_heads = config.num_heads
-        self.embed_dim = config.d_model
-        self.embedding = nn.Embedding(config.vocab_size, self.embed_dim)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(self, encoder_input_ids, encoder_attention_mask):
 
-        batch_size, seq_length = encoder_input_ids.shape
-
-        encoder_hidden_states = self.embedding(encoder_input_ids)
-        encoder_hidden_states = self.dropout(encoder_hidden_states)
-
         input_shape = encoder_input_ids.size()
-        extended_encoder_attention_mask = get_extended_attention_mask(
-            encoder_attention_mask, input_shape, encoder_input_ids.device, False
-        )
+        input_ids = encoder_input_ids.view(-1, input_shape[-1])
+        encoder_hidden_states = self.embed_tokens(input_ids)
 
+        batch_size, seq_length = input_shape
+
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_encoder_attention_mask = get_extended_attention_mask(
+            encoder_attention_mask, input_shape, is_decoder=False
+        )
         encoder_position_bias = torch.empty((batch_size, self.num_heads, seq_length, 1))
+        encoder_hidden_states = self.dropout(encoder_hidden_states)
 
         return (
             encoder_hidden_states,
@@ -201,41 +133,25 @@ class EncoderTokenEmbeddings(nn.Module):
 
 
 class DecoderTokenEmbeddings(nn.Module):
-    def __init__(self, config: SwitchConfig) -> None:
+    def __init__(self, config: SwitchTransformersConfig) -> None:
         super().__init__()
 
         self.num_heads = config.num_heads
-        self.embed_dim = config.d_model
-        self.embedding = nn.Embedding(config.vocab_size, self.embed_dim)
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
         self, decoder_input_ids, decoder_attention_mask, encoder_attention_mask
     ):
-        # decoder_input_ids = self._prepare_decoder_input_ids_for_generation(
-        #     encoder_attention_mask.shape[0],
-        #     self.config.decoder_start_token_id,
-        #     self.config.eos_token_id,
-        #     device=encoder_attention_mask.device,
-        # )
-        # decoder_input_ids = prepare_decoder_input_ids_for_generation(
-        #     encoder_attention_mask.shape[0],
-        #     0,
-        #     device=encoder_attention_mask.device,
-        # )
-        # decoder_attention_mask = decoder_input_ids.new_ones(
-        #     decoder_input_ids.shape, dtype=torch.long
-        # )
         input_shape = decoder_input_ids.size()
         decoder_input_ids = decoder_input_ids.view(-1, input_shape[-1])
 
         encoder_extended_attention_mask = invert_attention_mask(encoder_attention_mask)
-
         extended_attention_mask = get_extended_attention_mask(
-            decoder_attention_mask, input_shape, decoder_input_ids.device, True
+            decoder_attention_mask, input_shape, True
         )
 
-        decoder_hidden_states = self.embedding(decoder_input_ids)
+        decoder_hidden_states = self.embed_tokens(decoder_input_ids)
         decoder_hidden_states = self.dropout(decoder_hidden_states)
 
         batch_size, seq_length = decoder_input_ids.shape
@@ -249,150 +165,100 @@ class DecoderTokenEmbeddings(nn.Module):
         )
 
 
-# class RelativePositionBiases(nn.Module):
-#     def __init__(self, config: SwitchConfig):
-#         super().__init__()
+class SwitchRouter(nn.Module):
+    """
+    Router using tokens choose top-1 experts assignment.
 
-#         self.relative_attention_num_buckets = config.relative_attention_num_buckets
-#         self.relative_attention_max_distance = config.relative_attention_max_distance
-#         self.rel_embedding = nn.Embedding(
-#             self.relative_attention_num_buckets, self.n_heads
-#         )
+    This router uses the same mechanism as in Switch Transformer (https://arxiv.org/abs/2101.03961) and V-MoE
+    (https://arxiv.org/abs/2106.05974): tokens choose their top experts. Items are sorted by router_probs and then
+    routed to their choice of expert until the expert's expert_capacity is reached. **There is no guarantee that each
+    token is processed by an expert**, or that each expert receives at least one token.
 
-#     @staticmethod
-#     def _relative_position_bucket(
-#         relative_position, bidirectional=True, num_buckets=32, max_distance=128
-#     ):
-#         """
-#         Adapted from Mesh Tensorflow:
-#         https://github.com/tensorflow/mesh/blob/0cb87fe07da627bf0b7e60475d59f95ed6b5be3d/mesh_tensorflow/transformer/transformer_layers.py#L593
+    """
 
-#         Translate relative position to a bucket number for relative attention. The relative position is defined as
-#         memory_position - query_position, i.e. the distance in tokens from the attending position to the attended-to
-#         position. If bidirectional=False, then positive relative positions are invalid. We use smaller buckets for
-#         small absolute relative_position and larger buckets for larger absolute relative_positions. All relative
-#         positions >=max_distance map to the same bucket. All relative positions <=-max_distance map to the same bucket.
-#         This should allow for more graceful generalization to longer sequences than the model has been trained on
-
-#         Args:
-#             relative_position: an int32 Tensor
-#             bidirectional: a boolean - whether the attention is bidirectional
-#             num_buckets: an integer
-#             max_distance: an integer
-
-#         Returns:
-#             a Tensor with the same shape as relative_position, containing int32 values in the range [0, num_buckets)
-#         """
-#         relative_buckets = 0
-#         if bidirectional:
-#             num_buckets //= 2
-#             relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
-#             relative_position = torch.abs(relative_position)
-#         else:
-#             relative_position = -torch.min(
-#                 relative_position, torch.zeros_like(relative_position)
-#             )
-#         # now relative_position is in the range [0, inf)
-
-#         # half of the buckets are for exact increments in positions
-#         max_exact = num_buckets // 2
-#         is_small = relative_position < max_exact
-
-#         # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
-#         relative_position_if_large = max_exact + (
-#             torch.log(relative_position.float() / max_exact)
-#             / math.log(max_distance / max_exact)
-#             * (num_buckets - max_exact)
-#         ).to(torch.long)
-#         relative_position_if_large = torch.min(
-#             relative_position_if_large,
-#             torch.full_like(relative_position_if_large, num_buckets - 1),
-#         )
-
-#         relative_buckets += torch.where(
-#             is_small, relative_position, relative_position_if_large
-#         )
-#         return relative_buckets
-
-#     def compute_bias(self, query_length, key_length, device=None):
-#         """Compute binned relative position bias"""
-#         if device is None:
-#             device = self.rel_embedding.weight.device
-#         context_position = torch.arange(query_length, dtype=torch.long, device=device)[
-#             :, None
-#         ]
-#         memory_position = torch.arange(key_length, dtype=torch.long, device=device)[
-#             None, :
-#         ]
-#         relative_position = (
-#             memory_position - context_position
-#         )  # shape (query_length, key_length)
-#         relative_position_bucket = self._relative_position_bucket(
-#             relative_position,  # shape (query_length, key_length)
-#             bidirectional=(not self.is_decoder),
-#             num_buckets=self.relative_attention_num_buckets,
-#             max_distance=self.relative_attention_max_distance,
-#         )
-#         values = self.rel_embedding(
-#             relative_position_bucket
-#         )  # shape (query_length, key_length, num_heads)
-#         values = values.permute([2, 0, 1]).unsqueeze(
-#             0
-#         )  # shape (1, num_heads, query_length, key_length)
-#         return values
-
-#     def forward(self, query_length, key_length, device=None):
-#         """Input shape: Time(SeqLen)"""
-#         device = self.rel_embedding.weight.device
-#         if query_length == key_length and query_length == getattr(
-#             self, "cached_key_length", None
-#         ):
-#             return self.cache
-#         else:
-#             values = self.compute_bias(query_length, key_length, device=device)
-#             self.cache = values
-#             self.cached_key_length = key_length
-#             return values
-
-
-class LayerNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        Construct a layernorm module in the T5 style. No bias and no subtraction of mean.
-        """
+    def __init__(self, config: SwitchTransformersConfig):
         super().__init__()
-        self.scale = nn.Parameter(torch.ones(hidden_size))
-        self.epsilon = eps
+        self.num_experts = config.num_experts
+        self.expert_capacity = config.expert_capacity
+        self.classifier = nn.Linear(
+            config.hidden_size, self.num_experts, bias=config.router_bias
+        )
+        self.jitter_noise = config.router_jitter_noise
+        self.ignore_padding_tokens = config.router_ignore_padding_tokens
+
+    def _compute_router_probabilities(
+        self, hidden_states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.jitter_noise > 0:
+            # Get the lower and upper bound of the uniform distribution
+            # Adapted from: https://stackoverflow.com/questions/44328530/how-to-get-a-uniform-distribution-in-a-range-r1-r2-in-pytorch
+            distrib_lower_bound = 1.0 - self.jitter_noise
+            distrib_upper_bound = 1.0 + self.jitter_noise
+
+            uniform_distrib = torch.rand(
+                hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype
+            )
+            uniform_distrib = uniform_distrib * (
+                distrib_lower_bound - distrib_upper_bound
+            )
+
+            uniform_distrib = uniform_distrib + distrib_upper_bound
+            # Multiply the token inputs by the uniform distribution - adding some noise
+            hidden_states *= uniform_distrib
+
+        # Shape: [num_groups, tokens_per_group, num_experts]
+        router_logits = self.classifier(hidden_states)
+
+        # Apply Softmax and cast back to the original `dtype`
+        router_probabilities = nn.functional.softmax(
+            router_logits, dim=-1, dtype=router_logits.dtype
+        ).to(hidden_states.dtype)
+        return router_probabilities, router_logits
+
+    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        router_probs, router_logits = self._compute_router_probabilities(hidden_states)
+
+        expert_index = torch.argmax(router_probs, dim=-1)
+        expert_index = torch.nn.functional.one_hot(
+            expert_index, num_classes=self.num_experts
+        )
+
+        # Mask tokens outside expert capacity. Sum over each sequence
+        token_priority = torch.cumsum(expert_index, dim=-2)
+        # mask if the token routed to to the expert will overflow
+        expert_capacity_mask = token_priority <= self.expert_capacity
+        expert_index = expert_index * expert_capacity_mask
+
+        router_probs = torch.max(router_probs, dim=-1).values.unsqueeze(-1)
+        return expert_index, router_probs
+
+class SwitchLMPredictionHead(nn.Module):
+    def __init__(self, config: SwitchTransformersConfig):
+        super().__init__()
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
     def forward(self, hidden_states):
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.epsilon)
-
-        # convert into half-precision if necessary
-        if self.scale.dtype in [torch.float16, torch.bfloat16]:
-            hidden_states = hidden_states.to(self.scale.dtype)
-
-        return self.scale * hidden_states
-
+        return self.lm_head(hidden_states)
 
 class SwitchLayerFF(nn.Module):
-    def __init__(self, config: SwitchConfig):
+    def __init__(self, config: SwitchTransformersConfig):
         super().__init__()
-        self.DenseReluDense = T5DenseActDense(config)
-        self.layer_norm = LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.mlp = SwitchTransformersDenseActDense(config)
+        self.layer_norm = SwitchTransformersLayerNorm(
+            config.d_model, eps=config.layer_norm_epsilon
+        )
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(self, hidden_states):
         forwarded_states = self.layer_norm(hidden_states)
-        forwarded_states = self.DenseReluDense(forwarded_states)
+        forwarded_states = self.mlp(forwarded_states)
         hidden_states = hidden_states + self.dropout(forwarded_states)
         return hidden_states
 
-
 class SwitchFinalLayerNorm(nn.Module):
-    def __init__(self, config: SwitchConfig):
+    def __init__(self, config: SwitchTransformersConfig):
         super().__init__()
-        self.layer_norm = LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = SwitchTransformersLayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(self, hidden_states):
@@ -401,119 +267,8 @@ class SwitchFinalLayerNorm(nn.Module):
         return hidden_states
 
 
-class SwitchAggregator(nn.Module):
-    def __init__(self, config: SwitchConfig):
-        super().__init__()
-        self.n_experts = config.num_experts
-        self.dropout = nn.Dropout(config.dropout_rate)
-
-    def forward(self, hidden_states, expert_output, routes, route_prob_max):
-        # Capture the shape to change shapes later
-        batch_size, seq_len, d_model = hidden_states.shape
-
-        # Initialize an empty tensor to store outputs
-        final_output = hidden_states.new_zeros((batch_size * seq_len, d_model))
-
-        # Assign to final output
-        for i in range(self.n_experts):
-            indexes_list = torch.nonzero(routes == i)
-            if len(indexes_list) > 0:
-                final_output[indexes_list] = expert_output[
-                    i
-                ]  # .view(-1, hidden_states.shape[-1])[indexes_list]
-
-        final_output = final_output * route_prob_max.view(-1, 1)
-        # if self.is_scale_prob:
-        #     # Multiply by the expert outputs by the probabilities $y = p_i(x) E_i(x)$
-        #     final_output = final_output * route_prob_max.view(-1, 1)
-        # else:
-        #     # Don't scale the values but multiply by $\frac{p}{\hat{p}} = 1$ so that the gradients flow
-        #     # (this is something we experimented with).
-        #     final_output = final_output * (
-        #         route_prob_max / route_prob_max.detach()
-        #     ).view(-1, 1)
-
-        # Change the shape of the final output back to `[batch_size, seq_len, d_model]`
-        final_output = final_output.view(batch_size, seq_len, d_model)
-        hidden_states = hidden_states + self.dropout(final_output)
-        return hidden_states
-
-
-class SwitchRouter(nn.Module):
-    def __init__(self, config: SwitchConfig):
-        super().__init__()
-        self.router = nn.Linear(config.d_model, config.num_experts, bias=False)
-        self.softmax = nn.Softmax(dim=-1)
-
-        self.hidden_size = config.d_model
-
-        self.n_experts = config.num_experts
-        self.capacity_factor = config.eval_capacity_factor
-
-        self.layer_norm = LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
-
-    def forward(self, hidden_states):
-        hidden_states = self.layer_norm(hidden_states)
-        # print(hidden_states.shape)
-        batch_size, seq_len, _ = hidden_states.shape
-
-        num_tokens = batch_size * seq_len
-        capacity = torch.ceil(torch.tensor(num_tokens / self.n_experts) * self.capacity_factor).to(
-            torch.long
-        )
-
-        # Flatten the sequence and batch dimensions
-        hidden_states = hidden_states.view(-1, self.hidden_size)
-
-        # Get routing probabilities for each of the tokens.
-        # $$p_i(x) = \frac{e^{h(x)_i}}{\sum^N_j e^{h(x)_j}}$$
-        # where $N$ is the number of experts `n_experts` and
-        # $h(\cdot)$ is the linear transformation of token embeddings.
-        route_prob = self.softmax(self.router(hidden_states))
-        # print(route_prob.shape)
-
-        # Get the maximum routing probabilities and the routes.
-        # We route to the expert with highest probability
-        route_prob_max, routes = torch.max(route_prob, dim=-1)
-        # print(route_prob_max.shape, routes.shape)
-        print(routes)
-        routes = routes.long()
-
-        # expert_mask = F.one_hot(routes, self.n_experts).long()
-        # print(expert_mask)
-
-        # token_priority = torch.cumsum(expert_mask, dim=1) * expert_mask - 1.0
-        # token_priority = torch.max(token_priority, dim=-1)
-
-        # print(token_priority)
-        # exit()
-        return routes, route_prob_max
-
-        # # Get indexes of tokens going to each expert
-        # indexes_list = []
-        # for i in range(self.n_experts):
-        #     token_list = torch.nonzero(routes == i).flatten()
-        #     indexes_list.append((routes == i).nonzero().view(-1))
-        # indexes_list = torch.cat(
-        #     [
-        #         torch.eq(routes, i).nonzero(as_tuple=True)[0]
-        #         for i in range(self.n_experts)
-        #     ]
-        # )
-        # # indexes_list = indexes_list.reshape(batch_size, -1)
-        # # route_prob_max = route_prob_max.reshape(batch_size, -1)
-
-        # return indexes_list, route_prob_max
-
-
-# from transformers.pytorch_utils import (
-#     find_pruneable_heads_and_indices,
-#     prune_linear_layer,
-# )
-
-
 class SwitchAttention(nn.Module):
-    def __init__(self, config: SwitchConfig):
+    def __init__(self, config: SwitchTransformersConfig):
         super().__init__()
         self.is_decoder = config.is_decoder
         self.d_model = config.d_model
@@ -623,7 +378,7 @@ class SwitchAttention(nn.Module):
 
 
 class SwitchAttentionRelative(SwitchAttention):
-    def __init__(self, config: SwitchConfig):
+    def __init__(self, config: SwitchTransformersConfig):
         super().__init__(config)
 
         self.relative_attention_num_buckets = config.relative_attention_num_buckets
@@ -835,7 +590,7 @@ class T5LayerSelfAttention(nn.Module):
             if has_relative_attention_bias
             else SwitchAttention(config)
         )
-        self.layer_norm = LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = SwitchTransformersLayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
@@ -855,7 +610,7 @@ class T5LayerCrossAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.EncDecAttention = SwitchAttention(config)
-        self.layer_norm = LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = SwitchTransformersLayerNorm(config.d_model, eps=config.layer_norm_epsilon)
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
@@ -882,8 +637,11 @@ class T5LayerCrossAttention(nn.Module):
         )  # decoder_hidden_states, encoder_decoder_position_bias
 
 
+
 class SwitchEncoderBlock(nn.Module):
-    def __init__(self, config: SwitchConfig, has_relative_attention_bias=False):
+    def __init__(
+        self, config: SwitchTransformersConfig, has_relative_attention_bias=False
+    ):
         super().__init__()
         self.has_relative_attention_bias = (
             has_relative_attention_bias  # the first block has relative attention bias
@@ -908,12 +666,16 @@ class SwitchEncoderBlock(nn.Module):
 
 
 class SwitchDecoderBlock(nn.Module):
-    def __init__(self, config: SwitchConfig, has_relative_attention_bias=False):
+    def __init__(
+        self, config: SwitchTransformersConfig, has_relative_attention_bias=False
+    ):
         super().__init__()
         self.has_relative_attention_bias = (
             has_relative_attention_bias  # the first block has relative attention bias
         )
-        self.attention = T5LayerSelfAttention(config, has_relative_attention_bias)
+        self.attention = T5LayerSelfAttention(
+            config, has_relative_attention_bias
+        )
         self.cross_attention = T5LayerCrossAttention(config)
 
     def forward(
@@ -943,160 +705,3 @@ class SwitchDecoderBlock(nn.Module):
             decoder_position_bias,
             encoder_decoder_position_bias,
         )
-
-
-class SwitchModel(nn.Module):
-    def __init__(self, config: SwitchConfig):
-        super().__init__()
-
-        # self.config = config
-        self.n_heads = config.num_heads
-        self.n_experts = config.num_experts
-        self.d_model = config.d_model
-        self.n_layers = config.num_layers
-
-        self.encoder_layers = nn.ModuleList()
-        self.decoder_layers = nn.ModuleList()
-
-        # shared embedding layer
-        self.token_embedder = nn.Embedding(config.vocab_size, config.d_model)
-
-        # encoder layers
-        encoder_config = copy.deepcopy(config)
-        encoder_config.is_decoder = False
-        encoder_config.use_cache = False
-        encoder_config.is_encoder_decoder = False
-        self.encoder_layers.append(EncoderTokenEmbeddings(encoder_config))
-        for i in range(encoder_config.num_layers):
-            self.encoder_layers.append(SwitchEncoderBlock(encoder_config, bool(i == 0)))
-            # moe is attached every two layers
-            if i % 2 == 1:
-                self.encoder_layers.append(SwitchRouter(encoder_config))
-                for expert_num in range(encoder_config.num_experts):
-                    self.encoder_layers.append(SwitchExpert(encoder_config, expert_num))
-                self.encoder_layers.append(SwitchAggregator(encoder_config))
-            else:
-                self.encoder_layers.append(SwitchLayerFF(encoder_config))
-        self.encoder_layers.append(SwitchFinalLayerNorm(encoder_config))
-        # self.encoder = T5Stack(encoder_config, self.token_embedder)
-
-        # decoder layers
-        decoder_config = copy.deepcopy(config)
-        decoder_config.is_decoder = True
-        decoder_config.is_encoder_decoder = False
-        decoder_config.num_layers = config.num_decoder_layers
-        self.decoder_layers.append(DecoderTokenEmbeddings(decoder_config))
-        for i in range(decoder_config.num_layers):
-            self.decoder_layers.append(SwitchDecoderBlock(decoder_config, bool(i == 0)))
-            # moe is attached every two layers
-            if i % 2 == 1:
-                self.decoder_layers.append(SwitchRouter(decoder_config))
-                for expert_num in range(decoder_config.num_experts):
-                    self.decoder_layers.append(SwitchExpert(decoder_config, expert_num))
-                self.decoder_layers.append(SwitchAggregator(decoder_config))
-            else:
-                self.decoder_layers.append(SwitchLayerFF(decoder_config))
-        self.decoder_layers.append(SwitchFinalLayerNorm(decoder_config))
-        # self.decoder = T5Stack(decoder_config, self.token_embedder)
-
-    def forward(
-        self,
-        encoder_input_ids,
-        encoder_attention_mask,
-        decoder_input_ids,
-        decoder_attention_mask,
-    ):
-
-        # encoder embedding
-        (
-            encoder_hidden_states,
-            encoder_extended_attention_mask,
-            encoder_position_bias,
-        ) = self.encoder_layers[0](encoder_input_ids, encoder_attention_mask)
-
-        # encoder layers
-        k = 1
-        # batch_size, seq_len = encoder_input_ids.shape
-        # encoder_position_bias = torch.empty((batch_size, self.n_heads, seq_len, 1))
-        while k < len(self.encoder_layers):
-            if isinstance(self.encoder_layers[k], SwitchEncoderBlock):
-                encoder_hidden_states, encoder_position_bias = self.encoder_layers[k](
-                    encoder_hidden_states,
-                    encoder_position_bias,
-                    encoder_extended_attention_mask,
-                )
-            elif isinstance(self.encoder_layers[k], SwitchFinalLayerNorm):
-                encoder_hidden_states = self.encoder_layers[k](encoder_hidden_states)
-            elif isinstance(self.encoder_layers[k], SwitchLayerFF):
-                encoder_hidden_states = self.encoder_layers[k](encoder_hidden_states)
-            elif isinstance(self.encoder_layers[k], SwitchRouter):
-                routes, route_prob_max = self.encoder_layers[k](encoder_hidden_states)
-                k += 1
-                expert_outputs = []
-                for i in range(self.n_experts):
-                    output = self.encoder_layers[k](encoder_hidden_states, routes)
-                    expert_outputs.append(output)
-                    k += 1
-                # expert_outputs = torch.cat(expert_outputs, dim=0)
-            elif isinstance(self.encoder_layers[k], SwitchAggregator):
-                encoder_hidden_states = self.encoder_layers[k](
-                    encoder_hidden_states, expert_outputs, routes, route_prob_max
-                )
-            else:
-                raise NotImplementedError
-
-            k += 1
-
-        # decoder embedding
-        (
-            decoder_hidden_states,
-            encoder_extended_attention_mask,
-            decoder_extended_attention_mask,
-            decoder_position_bias,
-        ) = self.decoder_layers[0](
-            decoder_input_ids, decoder_attention_mask, encoder_attention_mask
-        )
-        encoder_decoder_position_bias = encoder_position_bias
-
-        # decoder layers
-        k = 1
-        # batch_size, seq_len = decoder_input_ids.shape
-        # decoder_position_bias = torch.empty((batch_size, self.n_heads, seq_len, 1))
-        while k < len(self.decoder_layers):
-            if isinstance(self.decoder_layers[k], SwitchDecoderBlock):
-                (
-                    decoder_hidden_states,
-                    decoder_position_bias,
-                    encoder_decoder_position_bias,
-                ) = self.decoder_layers[k](
-                    decoder_hidden_states,
-                    encoder_hidden_states,
-                    decoder_extended_attention_mask,
-                    encoder_extended_attention_mask,
-                    decoder_position_bias,
-                    encoder_decoder_position_bias,
-                )
-            elif isinstance(self.decoder_layers[k], SwitchFinalLayerNorm):
-                decoder_hidden_states = self.decoder_layers[k](decoder_hidden_states)
-            elif isinstance(self.decoder_layers[k], SwitchLayerFF):
-                decoder_hidden_states = self.decoder_layers[k](decoder_hidden_states)
-            elif isinstance(self.decoder_layers[k], SwitchRouter):
-
-                routes, route_prob_max = self.decoder_layers[k](decoder_hidden_states)
-                k += 1
-                expert_outputs = []
-                for i in range(self.n_experts):
-                    output = self.decoder_layers[k](decoder_hidden_states, routes)
-                    expert_outputs.append(output)
-                    k += 1
-                # expert_outputs = torch.cat(expert_outputs, dim=0)
-            elif isinstance(self.decoder_layers[k], SwitchAggregator):
-                decoder_hidden_states = self.decoder_layers[k](
-                    decoder_hidden_states, expert_outputs, routes, route_prob_max
-                )
-            else:
-                raise NotImplementedError
-
-            k += 1
-
-        return decoder_hidden_states

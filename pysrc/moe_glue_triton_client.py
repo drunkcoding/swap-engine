@@ -50,7 +50,7 @@ dataloader = torch.utils.data.DataLoader(
     train_dataset, collate_fn=default_data_collator, batch_size=8, shuffle=True, drop_last=True
 )
 
-CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
+# CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
 URL = "localhost:8001"
 triton_client = grpcclient.InferenceServerClient(url=URL, verbose=False)
 
@@ -84,11 +84,11 @@ for batch in tqdm(dataloader):
         format_triton_input(np.zeros((1, 1)).astype(np.int32), "decoder_input_ids"),
         format_triton_input(np.ones((1, 1)).astype(np.int32), "decoder_attention_mask"),
     ]
-    triton_outputs = [format_triton_output("decoder_hidden_states")]
+    triton_outputs = [format_triton_output("logits")]
 
     start_time = time.perf_counter()
     results = triton_client.infer(
-        "t5x-base-e128-ensemble",
+        "switch-base-8-ensemble",
         triton_inputs,
         outputs=triton_outputs,
         request_id=uuid.uuid4().hex,

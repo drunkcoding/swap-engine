@@ -45,8 +45,12 @@ from t5x import train_state as train_state_lib
 from t5x import utils
 from typing_extensions import Protocol
 
+from pyutils.ckpt_load import copy_t5x_weights
+from pysrc.transformer.switch import SwitchConfig
+
 # Automatically search for gin files relative to the T5X package.
-_DEFAULT_GIN_SEARCH_PATHS = ["${HOME}", "${HOME}/flaxformer/t5x/configs/t5/models"]
+home = os.path.expanduser("~")
+_DEFAULT_GIN_SEARCH_PATHS = [home, f"{home}/flaxformer/"]
 
 
 def tqa_open_preprocessor(
@@ -271,482 +275,484 @@ class InferenceEvaluator:
         return all_metrics
 
 
-def jax2tensor(arr):
-    """Converts a JAX array to a PyTorch tensor."""
-    return torch.from_numpy(jax.device_get(arr))
+# def jax2tensor(arr):
+#     """Converts a JAX array to a PyTorch tensor."""
+#     return torch.from_numpy(jax.device_get(arr))
 
 
-CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
+# CKPT_PATH = "/mnt/raid0nvme1/xly/checkpoints/t5x-torchscript/moe/base/e128"
 
-def copy_ds_weights(source_state_dict):
-    from pysrc.transformer.switch import SwitchModelDeepSpeed, SwitchConfig
+# def copy_ds_weights(source_state_dict):
+#     from pysrc.transformer.switch import SwitchModelDeepSpeed, SwitchConfig
 
-    config = SwitchConfig.from_pretrained("config/t5x/base")
-    print("config", config)
-    model = SwitchModelDeepSpeed(config)
+#     config = SwitchConfig.from_pretrained("config/t5x/base")
+#     print("config", config)
+#     model = SwitchModelDeepSpeed(config)
 
-    token_embedder = {
-        "embedding.weight": jax2tensor(
-            source_state_dict["token_embedder"].pop("embedding")
-        )
-    }
-    model.encoder_layers[0].load_state_dict(token_embedder)
-    model.decoder_layers[0].load_state_dict(token_embedder)
+#     token_embedder = {
+#         "embedding.weight": jax2tensor(
+#             source_state_dict["token_embedder"].pop("embedding")
+#         )
+#     }
+#     model.encoder_layers[0].load_state_dict(token_embedder)
+#     model.decoder_layers[0].load_state_dict(token_embedder)
 
-    k = 1
-    for i in range(config.num_layers):
-        gc.collect()
-        # attention layers
-        jax_attention_layer = source_state_dict["encoder"][f"layers_{i}"].pop(
-            "attention"
-        )
-        torch_attention_layer = {
-            "SelfAttention.q.weight": jax2tensor(
-                jax_attention_layer["query"]["kernel"]
-            ),
-            "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
-            "SelfAttention.v.weight": jax2tensor(
-                jax_attention_layer["value"]["kernel"]
-            ),
-            "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
-            "layer_norm.scale": jax2tensor(
-                source_state_dict["encoder"][f"layers_{i}"]["pre_attention_layer_norm"][
-                    "scale"
-                ]
-            ),
-        }
-        if (i==0):
-            torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
-                source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
-            ).transpose(0, 1)
-        print(type(model.encoder_layers[i + k]))
-        model.encoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
+#     gc.collect()
 
-        # feed forward layers
-        if i % 2 == 1:
-            k += 1
-            jax_router_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"][
-                "router"
-            ]
-            jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"].pop(
-                "expert"
-            )
-            wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
-            wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
+#     k = 1
+#     for i in range(config.num_layers):
+#         gc.collect()
+#         # attention layers
+#         jax_attention_layer = source_state_dict["encoder"][f"layers_{i}"].pop(
+#             "attention"
+#         )
+#         torch_attention_layer = {
+#             "SelfAttention.q.weight": jax2tensor(
+#                 jax_attention_layer["query"]["kernel"]
+#             ),
+#             "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
+#             "SelfAttention.v.weight": jax2tensor(
+#                 jax_attention_layer["value"]["kernel"]
+#             ),
+#             "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
+#             "layer_norm.scale": jax2tensor(
+#                 source_state_dict["encoder"][f"layers_{i}"]["pre_attention_layer_norm"][
+#                     "scale"
+#                 ]
+#             ),
+#         }
+#         if (i==0):
+#             torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
+#                 source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
+#             ).transpose(0, 1)
+#         print(type(model.encoder_layers[i + k]))
+#         model.encoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
 
-            torch_router_layer = {
-                "deepspeed_moe.gate.wg.weight": jax2tensor(
-                    jax_router_layer["router_weights"]["w"]["kernel"]
-                ).transpose(0, 1),
-                **{
-                    f"deepspeed_moe.experts.deepspeed_experts.{j}.wi.weight": wi[j].transpose(0, 1) for j in range(config.num_experts)
-                },
-                **{ f"deepspeed_moe.experts.deepspeed_experts.{j}.wo.weight": wo[j].transpose(0, 1) for j in range(config.num_experts)
-                }
-            }
-            # print(torch_router_layer.keys())
-            print(type(model.encoder_layers[i + k]))
-            model.encoder_layers[i + k].load_state_dict(torch_router_layer)
-        else:
-            # normal MLP
-            k += 1
-            jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"]
-            torch_mlp_layer = {
-                "DenseReluDense.wi.weight": jax2tensor(
-                    jax_mlp_layer["wi"]["kernel"]
-                ).transpose(0, 1),
-                "DenseReluDense.wo.weight": jax2tensor(
-                    jax_mlp_layer["wo"]["kernel"]
-                ).transpose(0, 1),
-                "layer_norm.scale": jax2tensor(
-                    source_state_dict["encoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
-                        "scale"
-                    ]
-                ),
-            }
-            print(type(model.encoder_layers[i + k]))
-            model.encoder_layers[i + k].load_state_dict(torch_mlp_layer)
+#         # feed forward layers
+#         if i % 2 == 1:
+#             k += 1
+#             jax_router_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"][
+#                 "router"
+#             ]
+#             jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"].pop(
+#                 "expert"
+#             )
+#             wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
+#             wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
 
-    k += 1  # final layer norm
-    torch_final_layer = {
-        "layer_norm.scale": jax2tensor(
-            source_state_dict["encoder"]["encoder_norm"]["scale"]
-        ),
-    }
-    model.encoder_layers[-1].load_state_dict(torch_final_layer)
+#             torch_router_layer = {
+#                 "deepspeed_moe.gate.wg.weight": jax2tensor(
+#                     jax_router_layer["router_weights"]["w"]["kernel"]
+#                 ).transpose(0, 1),
+#                 **{
+#                     f"deepspeed_moe.experts.deepspeed_experts.{j}.wi.weight": wi[j].transpose(0, 1) for j in range(config.num_experts)
+#                 },
+#                 **{ f"deepspeed_moe.experts.deepspeed_experts.{j}.wo.weight": wo[j].transpose(0, 1) for j in range(config.num_experts)
+#                 }
+#             }
+#             # print(torch_router_layer.keys())
+#             print(type(model.encoder_layers[i + k]))
+#             model.encoder_layers[i + k].load_state_dict(torch_router_layer)
+#         else:
+#             # normal MLP
+#             k += 1
+#             jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"]
+#             torch_mlp_layer = {
+#                 "DenseReluDense.wi.weight": jax2tensor(
+#                     jax_mlp_layer["wi"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "DenseReluDense.wo.weight": jax2tensor(
+#                     jax_mlp_layer["wo"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "layer_norm.scale": jax2tensor(
+#                     source_state_dict["encoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
+#                         "scale"
+#                     ]
+#                 ),
+#             }
+#             print(type(model.encoder_layers[i + k]))
+#             model.encoder_layers[i + k].load_state_dict(torch_mlp_layer)
 
-    # decoder layers
-    k = 1
-    for i in range(config.num_layers):
-        gc.collect()
-        # attention layers
-        jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
-            "self_attention"
-        )
-        torch_attention_layer = {
-            "SelfAttention.q.weight": jax2tensor(
-                jax_attention_layer["query"]["kernel"]
-            ),
-            "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
-            "SelfAttention.v.weight": jax2tensor(
-                jax_attention_layer["value"]["kernel"]
-            ),
-            "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
-            "layer_norm.scale": jax2tensor(
-                source_state_dict["decoder"][f"layers_{i}"][
-                    "pre_self_attention_layer_norm"
-                ]["scale"]
-            ),
-        }
-        if (i==0):
-            torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
-                source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
-            ).transpose(0, 1)
-        model.decoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
+#     k += 1  # final layer norm
+#     torch_final_layer = {
+#         "layer_norm.scale": jax2tensor(
+#             source_state_dict["encoder"]["encoder_norm"]["scale"]
+#         ),
+#     }
+#     model.encoder_layers[-1].load_state_dict(torch_final_layer)
 
-        jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
-            "encoder_decoder_attention"
-        )
-        torch_attention_layer = {
-            "EncDecAttention.q.weight": jax2tensor(
-                jax_attention_layer["query"]["kernel"]
-            ),
-            "EncDecAttention.k.weight": jax2tensor(
-                jax_attention_layer["key"]["kernel"]
-            ),
-            "EncDecAttention.v.weight": jax2tensor(
-                jax_attention_layer["value"]["kernel"]
-            ),
-            "EncDecAttention.o.weight": jax2tensor(
-                jax_attention_layer["out"]["kernel"]
-            ),
-            "layer_norm.scale": jax2tensor(
-                source_state_dict["decoder"][f"layers_{i}"][
-                    "pre_cross_attention_layer_norm"
-                ]["scale"]
-            ),
-        }
-        model.decoder_layers[i + k].cross_attention.load_state_dict(torch_attention_layer)
+#     # decoder layers
+#     k = 1
+#     for i in range(config.num_layers):
+#         gc.collect()
+#         # attention layers
+#         jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
+#             "self_attention"
+#         )
+#         torch_attention_layer = {
+#             "SelfAttention.q.weight": jax2tensor(
+#                 jax_attention_layer["query"]["kernel"]
+#             ),
+#             "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
+#             "SelfAttention.v.weight": jax2tensor(
+#                 jax_attention_layer["value"]["kernel"]
+#             ),
+#             "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
+#             "layer_norm.scale": jax2tensor(
+#                 source_state_dict["decoder"][f"layers_{i}"][
+#                     "pre_self_attention_layer_norm"
+#                 ]["scale"]
+#             ),
+#         }
+#         if (i==0):
+#             torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
+#                 source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
+#             ).transpose(0, 1)
+#         model.decoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
 
-        # feed forward layers
-        if i % 2 == 1:
-            k += 1
-            jax_router_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"][
-                "router"
-            ]
-            jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"].pop(
-                "expert"
-            )
-            wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
-            wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
+#         jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
+#             "encoder_decoder_attention"
+#         )
+#         torch_attention_layer = {
+#             "EncDecAttention.q.weight": jax2tensor(
+#                 jax_attention_layer["query"]["kernel"]
+#             ),
+#             "EncDecAttention.k.weight": jax2tensor(
+#                 jax_attention_layer["key"]["kernel"]
+#             ),
+#             "EncDecAttention.v.weight": jax2tensor(
+#                 jax_attention_layer["value"]["kernel"]
+#             ),
+#             "EncDecAttention.o.weight": jax2tensor(
+#                 jax_attention_layer["out"]["kernel"]
+#             ),
+#             "layer_norm.scale": jax2tensor(
+#                 source_state_dict["decoder"][f"layers_{i}"][
+#                     "pre_cross_attention_layer_norm"
+#                 ]["scale"]
+#             ),
+#         }
+#         model.decoder_layers[i + k].cross_attention.load_state_dict(torch_attention_layer)
 
-            torch_router_layer = {
-                "deepspeed_moe.gate.wg.weight": jax2tensor(
-                    jax_router_layer["router_weights"]["w"]["kernel"]
-                ).transpose(0, 1),
-                **{
-                    f"deepspeed_moe.experts.deepspeed_experts.{j}.wi.weight": wi[j].transpose(0, 1) for j in range(config.num_experts)
-                },
-                **{ f"deepspeed_moe.experts.deepspeed_experts.{j}.wo.weight": wo[j].transpose(0, 1) for j in range(config.num_experts)
-                }
-            }
-            # print(torch_router_layer.keys())
-            model.decoder_layers[i + k].load_state_dict(torch_router_layer)
-        else:
-            # normal MLP
-            k += 1
-            jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"]
-            torch_mlp_layer = {
-                "DenseReluDense.wi.weight": jax2tensor(
-                    jax_mlp_layer["wi"]["kernel"]
-                ).transpose(0, 1),
-                "DenseReluDense.wo.weight": jax2tensor(
-                    jax_mlp_layer["wo"]["kernel"]
-                ).transpose(0, 1),
-                "layer_norm.scale": jax2tensor(
-                    source_state_dict["decoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
-                        "scale"
-                    ]
-                ),
-            }
-            model.decoder_layers[i + k].load_state_dict(torch_mlp_layer)
+#         # feed forward layers
+#         if i % 2 == 1:
+#             k += 1
+#             jax_router_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"][
+#                 "router"
+#             ]
+#             jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"].pop(
+#                 "expert"
+#             )
+#             wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
+#             wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
 
-    k += 1  # final layer norm
-    torch_final_layer = {
-        "layer_norm.scale": jax2tensor(
-            source_state_dict["decoder"]["decoder_norm"]["scale"]
-        ),
-    }
-    model.decoder_layers[-1].load_state_dict(torch_final_layer)
+#             torch_router_layer = {
+#                 "deepspeed_moe.gate.wg.weight": jax2tensor(
+#                     jax_router_layer["router_weights"]["w"]["kernel"]
+#                 ).transpose(0, 1),
+#                 **{
+#                     f"deepspeed_moe.experts.deepspeed_experts.{j}.wi.weight": wi[j].transpose(0, 1) for j in range(config.num_experts)
+#                 },
+#                 **{ f"deepspeed_moe.experts.deepspeed_experts.{j}.wo.weight": wo[j].transpose(0, 1) for j in range(config.num_experts)
+#                 }
+#             }
+#             # print(torch_router_layer.keys())
+#             model.decoder_layers[i + k].load_state_dict(torch_router_layer)
+#         else:
+#             # normal MLP
+#             k += 1
+#             jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"]
+#             torch_mlp_layer = {
+#                 "DenseReluDense.wi.weight": jax2tensor(
+#                     jax_mlp_layer["wi"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "DenseReluDense.wo.weight": jax2tensor(
+#                     jax_mlp_layer["wo"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "layer_norm.scale": jax2tensor(
+#                     source_state_dict["decoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
+#                         "scale"
+#                     ]
+#                 ),
+#             }
+#             model.decoder_layers[i + k].load_state_dict(torch_mlp_layer)
+
+#     k += 1  # final layer norm
+#     torch_final_layer = {
+#         "layer_norm.scale": jax2tensor(
+#             source_state_dict["decoder"]["decoder_norm"]["scale"]
+#         ),
+#     }
+#     model.decoder_layers[-1].load_state_dict(torch_final_layer)
 
 
-    torch.save(model.state_dict(), os.path.join(CKPT_PATH, "model.pth"))
+#     torch.save(model.state_dict(), os.path.join(CKPT_PATH, "model.pth"))
 
-def copy_model_weights(source_state_dict):
-    # append workspace folder to system path
-    # sys.path.append(os.getcwd())
-    from pysrc.transformer.switch import SwitchModel, SwitchConfig
+# def copy_model_weights(source_state_dict):
+#     # append workspace folder to system path
+#     # sys.path.append(os.getcwd())
+#     from pysrc.transformer.switch import SwitchModel, SwitchConfig
 
-    config = SwitchConfig.from_pretrained("config/t5x/base")
-    print("config", config)
-    model = SwitchModel(config)
+#     config = SwitchConfig.from_pretrained("config/t5x/base")
+#     print("config", config)
+#     model = SwitchModel(config)
 
-    # shared embedding layers
+#     # shared embedding layers
 
-    # convert ShardedDeviceArray to torch Tensor
-    # source_state_dict["token_embedder"] = jax.device_get(source_state_dict["token_embedder"])
-    # print(type(source_state_dict["token_embedder"]))
-    token_embedder = {
-        "embedding.weight": jax2tensor(
-            source_state_dict["token_embedder"].pop("embedding")
-        )
-    }
-    model.encoder_layers[0].load_state_dict(token_embedder)
-    model.decoder_layers[0].load_state_dict(token_embedder)
+#     # convert ShardedDeviceArray to torch Tensor
+#     # source_state_dict["token_embedder"] = jax.device_get(source_state_dict["token_embedder"])
+#     # print(type(source_state_dict["token_embedder"]))
+#     token_embedder = {
+#         "embedding.weight": jax2tensor(
+#             source_state_dict["token_embedder"].pop("embedding")
+#         )
+#     }
+#     model.encoder_layers[0].load_state_dict(token_embedder)
+#     model.decoder_layers[0].load_state_dict(token_embedder)
 
-    torch.jit.save(
-        torch.jit.script(model.encoder_layers[0]),
-        os.path.join(CKPT_PATH, "encoder_token_embedder.pt"),
-    )
-    torch.jit.save(
-        torch.jit.script(model.decoder_layers[0]),
-        os.path.join(CKPT_PATH, "decoder_token_embedder.pt"),
-    )
+#     torch.jit.save(
+#         torch.jit.script(model.encoder_layers[0]),
+#         os.path.join(CKPT_PATH, "encoder_token_embedder.pt"),
+#     )
+#     torch.jit.save(
+#         torch.jit.script(model.decoder_layers[0]),
+#         os.path.join(CKPT_PATH, "decoder_token_embedder.pt"),
+#     )
 
-    # encoder layers
-    k = 1
-    for i in range(config.num_layers):
-        # attention layers
-        jax_attention_layer = source_state_dict["encoder"][f"layers_{i}"].pop(
-            "attention"
-        )
-        torch_attention_layer = {
-            "SelfAttention.q.weight": jax2tensor(
-                jax_attention_layer["query"]["kernel"]
-            ),
-            "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
-            "SelfAttention.v.weight": jax2tensor(
-                jax_attention_layer["value"]["kernel"]
-            ),
-            "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
-            "layer_norm.scale": jax2tensor(
-                source_state_dict["encoder"][f"layers_{i}"]["pre_attention_layer_norm"][
-                    "scale"
-                ]
-            ),
-        }
-        if (i==0):
-            torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
-                source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
-            ).transpose(0, 1)
-        model.encoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
-        torch.jit.save(
-            torch.jit.script(model.encoder_layers[i + k]),
-            os.path.join(CKPT_PATH, f"encoder_layer{i}_attention.pt"),
-        )
+#     # encoder layers
+#     k = 1
+#     for i in range(config.num_layers):
+#         # attention layers
+#         jax_attention_layer = source_state_dict["encoder"][f"layers_{i}"].pop(
+#             "attention"
+#         )
+#         torch_attention_layer = {
+#             "SelfAttention.q.weight": jax2tensor(
+#                 jax_attention_layer["query"]["kernel"]
+#             ),
+#             "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
+#             "SelfAttention.v.weight": jax2tensor(
+#                 jax_attention_layer["value"]["kernel"]
+#             ),
+#             "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
+#             "layer_norm.scale": jax2tensor(
+#                 source_state_dict["encoder"][f"layers_{i}"]["pre_attention_layer_norm"][
+#                     "scale"
+#                 ]
+#             ),
+#         }
+#         if (i==0):
+#             torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
+#                 source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
+#             ).transpose(0, 1)
+#         model.encoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
+#         torch.jit.save(
+#             torch.jit.script(model.encoder_layers[i + k]),
+#             os.path.join(CKPT_PATH, f"encoder_layer{i}_attention.pt"),
+#         )
 
-        # feed forward layers
-        if i % 2 == 1:
-            # Router
-            k += 1
-            jax_router_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"][
-                "router"
-            ]
-            torch_router_layer = {
-                "router.weight": jax2tensor(
-                    jax_router_layer["router_weights"]["w"]["kernel"]
-                ).transpose(0, 1),
-                "layer_norm.scale": jax2tensor(
-                    source_state_dict["encoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
-                        "scale"
-                    ]
-                ),
-            }
-            model.encoder_layers[i + k].load_state_dict(torch_router_layer)
-            torch.jit.save(
-                torch.jit.script(model.encoder_layers[i + k]),
-                os.path.join(CKPT_PATH, f"encoder_layer{i}_router.pt"),
-            )
+#         # feed forward layers
+#         if i % 2 == 1:
+#             # Router
+#             k += 1
+#             jax_router_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"][
+#                 "router"
+#             ]
+#             torch_router_layer = {
+#                 "router.weight": jax2tensor(
+#                     jax_router_layer["router_weights"]["w"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "layer_norm.scale": jax2tensor(
+#                     source_state_dict["encoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
+#                         "scale"
+#                     ]
+#                 ),
+#             }
+#             model.encoder_layers[i + k].load_state_dict(torch_router_layer)
+#             torch.jit.save(
+#                 torch.jit.script(model.encoder_layers[i + k]),
+#                 os.path.join(CKPT_PATH, f"encoder_layer{i}_router.pt"),
+#             )
 
-            # Experts
-            jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"].pop(
-                "expert"
-            )
-            print(
-                jax_mlp_layer["wi"]["kernel"].shape
-            )  # (num_experts, hidden_size, expert_dim)
-            wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
-            wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
-            for j in range(config.num_experts):
-                k += 1
-                torch_mlp_layer = {
-                    "wi.weight": wi[j].transpose(0, 1),
-                    "wo.weight": wo[j].transpose(0, 1),
-                }
-                model.encoder_layers[i + k].load_state_dict(torch_mlp_layer)
-                torch.jit.save(
-                    torch.jit.script(model.encoder_layers[i + k]),
-                    os.path.join(CKPT_PATH, f"encoder_layer{i}_expert{j}.pt"),
-                )
+#             # Experts
+#             jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"].pop(
+#                 "expert"
+#             )
+#             print(
+#                 jax_mlp_layer["wi"]["kernel"].shape
+#             )  # (num_experts, hidden_size, expert_dim)
+#             wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
+#             wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
+#             for j in range(config.num_experts):
+#                 k += 1
+#                 torch_mlp_layer = {
+#                     "wi.weight": wi[j].transpose(0, 1),
+#                     "wo.weight": wo[j].transpose(0, 1),
+#                 }
+#                 model.encoder_layers[i + k].load_state_dict(torch_mlp_layer)
+#                 torch.jit.save(
+#                     torch.jit.script(model.encoder_layers[i + k]),
+#                     os.path.join(CKPT_PATH, f"encoder_layer{i}_expert{j}.pt"),
+#                 )
 
-            k += 1  # skip the aggregator layer
-        else:
-            # normal MLP
-            k += 1
-            jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"]
-            torch_mlp_layer = {
-                "DenseReluDense.wi.weight": jax2tensor(
-                    jax_mlp_layer["wi"]["kernel"]
-                ).transpose(0, 1),
-                "DenseReluDense.wo.weight": jax2tensor(
-                    jax_mlp_layer["wo"]["kernel"]
-                ).transpose(0, 1),
-                "layer_norm.scale": jax2tensor(
-                    source_state_dict["encoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
-                        "scale"
-                    ]
-                ),
-            }
-            model.encoder_layers[i + k].load_state_dict(torch_mlp_layer)
-            torch.jit.save(
-                torch.jit.script(model.encoder_layers[i + k]),
-                os.path.join(CKPT_PATH, f"encoder_layer{i}_ff.pt"),
-            )
+#             k += 1  # skip the aggregator layer
+#         else:
+#             # normal MLP
+#             k += 1
+#             jax_mlp_layer = source_state_dict["encoder"][f"layers_{i}"]["mlp"]
+#             torch_mlp_layer = {
+#                 "DenseReluDense.wi.weight": jax2tensor(
+#                     jax_mlp_layer["wi"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "DenseReluDense.wo.weight": jax2tensor(
+#                     jax_mlp_layer["wo"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "layer_norm.scale": jax2tensor(
+#                     source_state_dict["encoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
+#                         "scale"
+#                     ]
+#                 ),
+#             }
+#             model.encoder_layers[i + k].load_state_dict(torch_mlp_layer)
+#             torch.jit.save(
+#                 torch.jit.script(model.encoder_layers[i + k]),
+#                 os.path.join(CKPT_PATH, f"encoder_layer{i}_ff.pt"),
+#             )
 
-    k += 1  # final layer norm
-    torch_final_layer = {
-        "layer_norm.scale": jax2tensor(
-            source_state_dict["encoder"]["encoder_norm"]["scale"]
-        ),
-    }
-    model.encoder_layers[-1].load_state_dict(torch_final_layer)
+#     k += 1  # final layer norm
+#     torch_final_layer = {
+#         "layer_norm.scale": jax2tensor(
+#             source_state_dict["encoder"]["encoder_norm"]["scale"]
+#         ),
+#     }
+#     model.encoder_layers[-1].load_state_dict(torch_final_layer)
 
-    # decoder layers
-    k = 1
-    for i in range(config.num_layers):
-        # attention layers
-        jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
-            "self_attention"
-        )
-        torch_attention_layer = {
-            "SelfAttention.q.weight": jax2tensor(
-                jax_attention_layer["query"]["kernel"]
-            ),
-            "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
-            "SelfAttention.v.weight": jax2tensor(
-                jax_attention_layer["value"]["kernel"]
-            ),
-            "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
-            "layer_norm.scale": jax2tensor(
-                source_state_dict["decoder"][f"layers_{i}"][
-                    "pre_self_attention_layer_norm"
-                ]["scale"]
-            ),
-        }
-        if (i==0):
-            torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
-                source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
-            ).transpose(0, 1)
-        model.decoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
+#     # decoder layers
+#     k = 1
+#     for i in range(config.num_layers):
+#         # attention layers
+#         jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
+#             "self_attention"
+#         )
+#         torch_attention_layer = {
+#             "SelfAttention.q.weight": jax2tensor(
+#                 jax_attention_layer["query"]["kernel"]
+#             ),
+#             "SelfAttention.k.weight": jax2tensor(jax_attention_layer["key"]["kernel"]),
+#             "SelfAttention.v.weight": jax2tensor(
+#                 jax_attention_layer["value"]["kernel"]
+#             ),
+#             "SelfAttention.o.weight": jax2tensor(jax_attention_layer["out"]["kernel"]),
+#             "layer_norm.scale": jax2tensor(
+#                 source_state_dict["decoder"][f"layers_{i}"][
+#                     "pre_self_attention_layer_norm"
+#                 ]["scale"]
+#             ),
+#         }
+#         if (i==0):
+#             torch_attention_layer["SelfAttention.relative_attention_bias.weight"] = jax2tensor(
+#                 source_state_dict["encoder"]["relpos_bias"]["rel_embedding"]
+#             ).transpose(0, 1)
+#         model.decoder_layers[i + k].attention.load_state_dict(torch_attention_layer)
 
-        jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
-            "encoder_decoder_attention"
-        )
-        torch_attention_layer = {
-            "EncDecAttention.q.weight": jax2tensor(
-                jax_attention_layer["query"]["kernel"]
-            ),
-            "EncDecAttention.k.weight": jax2tensor(
-                jax_attention_layer["key"]["kernel"]
-            ),
-            "EncDecAttention.v.weight": jax2tensor(
-                jax_attention_layer["value"]["kernel"]
-            ),
-            "EncDecAttention.o.weight": jax2tensor(
-                jax_attention_layer["out"]["kernel"]
-            ),
-            "layer_norm.scale": jax2tensor(
-                source_state_dict["decoder"][f"layers_{i}"][
-                    "pre_cross_attention_layer_norm"
-                ]["scale"]
-            ),
-        }
-        model.decoder_layers[i + k].cross_attention.load_state_dict(torch_attention_layer)
-        torch.jit.save(
-            torch.jit.script(model.decoder_layers[i + k]),
-            os.path.join(CKPT_PATH, f"decoder_layer{i}_cross_attention.pt"),
-        )
+#         jax_attention_layer = source_state_dict["decoder"][f"layers_{i}"].pop(
+#             "encoder_decoder_attention"
+#         )
+#         torch_attention_layer = {
+#             "EncDecAttention.q.weight": jax2tensor(
+#                 jax_attention_layer["query"]["kernel"]
+#             ),
+#             "EncDecAttention.k.weight": jax2tensor(
+#                 jax_attention_layer["key"]["kernel"]
+#             ),
+#             "EncDecAttention.v.weight": jax2tensor(
+#                 jax_attention_layer["value"]["kernel"]
+#             ),
+#             "EncDecAttention.o.weight": jax2tensor(
+#                 jax_attention_layer["out"]["kernel"]
+#             ),
+#             "layer_norm.scale": jax2tensor(
+#                 source_state_dict["decoder"][f"layers_{i}"][
+#                     "pre_cross_attention_layer_norm"
+#                 ]["scale"]
+#             ),
+#         }
+#         model.decoder_layers[i + k].cross_attention.load_state_dict(torch_attention_layer)
+#         torch.jit.save(
+#             torch.jit.script(model.decoder_layers[i + k]),
+#             os.path.join(CKPT_PATH, f"decoder_layer{i}_cross_attention.pt"),
+#         )
 
-        # feed forward layers
-        if i % 2 == 1:
-            # Router
-            k += 1
-            jax_router_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"][
-                "router"
-            ]
-            torch_router_layer = {
-                "router.weight": jax2tensor(
-                    jax_router_layer["router_weights"]["w"]["kernel"]
-                ).transpose(0, 1),
-                "layer_norm.scale": jax2tensor(
-                    source_state_dict["decoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
-                        "scale"
-                    ]
-                ),
-            }
-            model.decoder_layers[i + k].load_state_dict(torch_router_layer)
+#         # feed forward layers
+#         if i % 2 == 1:
+#             # Router
+#             k += 1
+#             jax_router_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"][
+#                 "router"
+#             ]
+#             torch_router_layer = {
+#                 "router.weight": jax2tensor(
+#                     jax_router_layer["router_weights"]["w"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "layer_norm.scale": jax2tensor(
+#                     source_state_dict["decoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
+#                         "scale"
+#                     ]
+#                 ),
+#             }
+#             model.decoder_layers[i + k].load_state_dict(torch_router_layer)
 
-            # Experts
-            jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"].pop(
-                "expert"
-            )
-            print(
-                jax_mlp_layer["wi"]["kernel"].shape
-            )  # (num_experts, hidden_size, expert_dim)
-            wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
-            wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
-            for j in range(config.num_experts):
-                k += 1
-                torch_mlp_layer = {
-                    "wi.weight": wi[j].transpose(0, 1),
-                    "wo.weight": wo[j].transpose(0, 1),
-                }
-                model.decoder_layers[i + k].load_state_dict(torch_mlp_layer)
+#             # Experts
+#             jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"].pop(
+#                 "expert"
+#             )
+#             print(
+#                 jax_mlp_layer["wi"]["kernel"].shape
+#             )  # (num_experts, hidden_size, expert_dim)
+#             wi = jax2tensor(jax_mlp_layer["wi"]["kernel"])
+#             wo = jax2tensor(jax_mlp_layer["wo"]["kernel"])
+#             for j in range(config.num_experts):
+#                 k += 1
+#                 torch_mlp_layer = {
+#                     "wi.weight": wi[j].transpose(0, 1),
+#                     "wo.weight": wo[j].transpose(0, 1),
+#                 }
+#                 model.decoder_layers[i + k].load_state_dict(torch_mlp_layer)
 
-            k += 1  # skip the aggregator layer
-        else:
-            # normal MLP
-            k += 1
-            jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"]
-            torch_mlp_layer = {
-                "DenseReluDense.wi.weight": jax2tensor(
-                    jax_mlp_layer["wi"]["kernel"]
-                ).transpose(0, 1),
-                "DenseReluDense.wo.weight": jax2tensor(
-                    jax_mlp_layer["wo"]["kernel"]
-                ).transpose(0, 1),
-                "layer_norm.scale": jax2tensor(
-                    source_state_dict["decoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
-                        "scale"
-                    ]
-                ),
-            }
-            model.decoder_layers[i + k].load_state_dict(torch_mlp_layer)
+#             k += 1  # skip the aggregator layer
+#         else:
+#             # normal MLP
+#             k += 1
+#             jax_mlp_layer = source_state_dict["decoder"][f"layers_{i}"]["mlp"]
+#             torch_mlp_layer = {
+#                 "DenseReluDense.wi.weight": jax2tensor(
+#                     jax_mlp_layer["wi"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "DenseReluDense.wo.weight": jax2tensor(
+#                     jax_mlp_layer["wo"]["kernel"]
+#                 ).transpose(0, 1),
+#                 "layer_norm.scale": jax2tensor(
+#                     source_state_dict["decoder"][f"layers_{i}"]["pre_mlp_layer_norm"][
+#                         "scale"
+#                     ]
+#                 ),
+#             }
+#             model.decoder_layers[i + k].load_state_dict(torch_mlp_layer)
 
-    k += 1  # final layer norm
-    torch_final_layer = {
-        "layer_norm.scale": jax2tensor(
-            source_state_dict["decoder"]["decoder_norm"]["scale"]
-        ),
-    }
-    model.decoder_layers[-1].load_state_dict(torch_final_layer)
+#     k += 1  # final layer norm
+#     torch_final_layer = {
+#         "layer_norm.scale": jax2tensor(
+#             source_state_dict["decoder"]["decoder_norm"]["scale"]
+#         ),
+#     }
+#     model.decoder_layers[-1].load_state_dict(torch_final_layer)
 
     
 
-    # # save model in torchscript format
-    # torch.jit.save(torch.jit.script(model), os.path.join(CKPT_PATH, "model.pt"))
-    # save model as pytorch state dict
-    torch.save(model.state_dict(), os.path.join(CKPT_PATH, "model.pth"))
+#     # # save model in torchscript format
+#     # torch.jit.save(torch.jit.script(model), os.path.join(CKPT_PATH, "model.pt"))
+#     # save model as pytorch state dict
+#     torch.save(model.state_dict(), os.path.join(CKPT_PATH, "model.pth"))
 
     
 
@@ -838,7 +844,9 @@ def evaluate(
     ):
         # print("train_state", train_state.state_dict()["target"])
         flax_state = train_state.state_dict()["target"]
-        print(flax_state["decoder"].keys())
+
+        config = SwitchConfig.from_pretrained("config/t5x/large/e128")
+        copy_t5x_weights(config, "model_repo_t5x_large_e128", "t5x_large_e128", flax_state)
         # copy_model_weights(flax_state)
         # copy_ds_weights(flax_state)
         exit()

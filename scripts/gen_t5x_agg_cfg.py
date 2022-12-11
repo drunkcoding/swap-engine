@@ -1,16 +1,12 @@
-from pysrc.transformer.switch.configuration_switch import SwitchConfig
+from transformers import SwitchTransformersConfig
 import os
-
 
 def make_dir_if_not_exists(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-
-CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
-MODEL_REPOSITORY = "model_repo_t5x"
-MODEL_NAME = "t5x-base-e128"
-
+MODEL_REPOSITORY = "model_repo_switch-base-8"
+MODEL_NAME = "switch-base-8"
 
 def generate_preaggregate_config(num_experts, model_name, layer_name, layer_idx):
     code = """
@@ -22,6 +18,7 @@ import tritonclient.grpc as grpcclient
 class TritonPythonModel:
     @staticmethod
     def auto_complete_config(auto_complete_model_config):
+        # (batch_size, sequence_length, num_expert)
         inputs = [
             {
                 'name': "hidden_states",
@@ -31,12 +28,12 @@ class TritonPythonModel:
             {
                 'name': "routes",
                 'data_type': 'TYPE_INT64',
-                'dims': [ -1 ],
+                'dims': [ -1 , -1, -1 ],
             },
             {
                 'name': "route_prob_max",
                 'data_type': 'TYPE_FP32',
-                'dims': [ -1 ],
+                'dims': [ -1 , -1, -1 ],
             }
         ]
         outputs = [{
@@ -121,11 +118,9 @@ class TritonPythonModel:
             sequence_id = request.correlation_id()
             request_id = request.request_id()
             for i in range(self.num_experts):
-                indexes_list = np.flatnonzero(routes == i)
-                if len(indexes_list) > 0:
-                    token_features = hidden_states.reshape(-1, hidden_states.shape[-1])[
-                        indexes_list
-                    ]
+                indexes_list = routes[:, :, idx].astype(bool)
+                if np.any(indexes_list):
+                    token_features = hidden_states[indexes_list]
                     # print("token_features", token_features, flush=True)
                     token_features = self.prepare_input("hidden_states", token_features)
                     # expert_routes = self.prepare_input("routes", routes)
@@ -140,18 +135,15 @@ class TritonPythonModel:
                         sequence_id=(sequence_id & 0xFFFFFFFF) | ((i+1) << 32),
                     )
 
-            final_output = np.zeros_like(hidden_states).reshape((batch_size * seq_len, d_model))
+            final_output = hidden_states.clone()
             for i in range(self.num_experts):
                 if expert_outputs[i] is not None:
                     output = expert_outputs[i].get_result()
                     output = output.as_numpy("hidden_states")
-                    indexes_list = np.flatnonzero(routes == i)
-                    print("output", i, output, flush=True)
+                    indexes_list = routes[:, :, idx].astype(bool)
                     final_output[indexes_list] = output
 
-            final_output = final_output * route_prob_max.reshape(-1, 1)
-            final_output = final_output.reshape(batch_size, seq_len, d_model)
-            hidden_states = hidden_states + final_output
+            hidden_states = final_output * route_prob_max
 
             # print(hidden_states, flush=True)
             
@@ -197,8 +189,7 @@ class TritonPythonModel:
         f.write(code)
 
 
-config = SwitchConfig.from_pretrained("config/t5x/base")
-
+config = SwitchTransformersConfig.from_pretrained("google/switch-base-8")
 
 for layer_idx in range(config.num_layers):
     # code generation
