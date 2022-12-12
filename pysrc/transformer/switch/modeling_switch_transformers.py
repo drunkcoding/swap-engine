@@ -5,6 +5,7 @@ from transformers import SwitchTransformersConfig
 from transformers.models.switch_transformers.modeling_switch_transformers import (
     SwitchTransformersLayerNorm,
     SwitchTransformersDenseActDense,
+    SwitchTransformersDenseGatedActDense,
     SwitchTransformersLayerCrossAttention,
     SwitchTransformersLayerSelfAttention,
 )
@@ -241,9 +242,12 @@ class SwitchLMPredictionHead(nn.Module):
         return self.lm_head(hidden_states)
 
 class SwitchLayerFF(nn.Module):
-    def __init__(self, config: SwitchTransformersConfig):
+    def __init__(self, config: SwitchTransformersConfig, is_gated: bool = False):
         super().__init__()
-        self.mlp = SwitchTransformersDenseActDense(config)
+        if is_gated:
+            self.mlp = SwitchTransformersDenseGatedActDense(config)
+        else:
+            self.mlp = SwitchTransformersDenseActDense(config)
         self.layer_norm = SwitchTransformersLayerNorm(
             config.d_model, eps=config.layer_norm_epsilon
         )
