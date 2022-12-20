@@ -1,17 +1,26 @@
-from transformers import SwitchTransformersConfig
+from dataclasses import dataclass, field
+from transformers import SwitchTransformersConfig, HfArgumentParser
 import os
 
 def make_dir_if_not_exists(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-MODEL_REPOSITORY = "model_repo_switch-base-8"
-MODEL_NAME = "switch-base-8"
+@dataclass
+class ModelArguments:
+    model_name: str = field(metadata={"help": "Name of the model from HuggingFace"})
+    def __post_init__(self):
+        self.model_repo = "_".join(["model_repo", self.model_name])
+
+parser = HfArgumentParser((ModelArguments,))
+args = parser.parse_args_into_dataclasses()[0]
 
 def generate_preaggregate_config(num_experts, model_name, layer_name, layer_idx):
     code = """
 import triton_python_backend_utils as pb_utils
 import numpy as np
+import os
+import hashlib
 import tritonclient
 import tritonclient.grpc as grpcclient
 
@@ -89,6 +98,13 @@ class TritonPythonModel:
         self.client = grpcclient.InferenceServerClient(
             url="localhost:8001", verbose=False
         )
+
+        self.data_path = f"/opt/data/{self.backend_name}"
+        try:
+            os.mkdir(os.path.dirname(self.data_path))
+            os.mkdir(self.data_path)
+        except:
+            pass
     
     def dummy_callback(self, result, error):
         pass
@@ -111,7 +127,13 @@ class TritonPythonModel:
             route_prob_max = pb_utils.get_input_tensor_by_name(request, "route_prob_max").as_numpy()
             # print("route_prob_max", route_prob_max, flush=True)
             batch_size, seq_len, d_model = hidden_states.shape
-            
+        
+            request_id = request.request_id()
+            req_id_md5 = hashlib.md5(str(request_id).encode()).hexdigest()
+
+            np.save(f"{self.data_path}/routes_{self.layer_name}_{self.layer_idx}_{req_id_md5}", routes, allow_pickle=False)
+            np.save(f"{self.data_path}/hidden_states_{self.layer_name}_{self.layer_idx}_{req_id_md5}", hidden_states, allow_pickle=False)
+            np.save(f"{self.data_path}/route_prob_max_{self.layer_name}_{self.layer_idx}_{req_id_md5}", route_prob_max, allow_pickle=False)
             
             expert_outputs = [None] * self.num_experts
             model_name = f"expert-{self.layer_name}-{self.layer_idx}"
@@ -140,7 +162,7 @@ class TritonPythonModel:
                 if expert_outputs[i] is not None:
                     output = expert_outputs[i].get_result()
                     output = output.as_numpy("hidden_states")
-                    indexes_list = routes[:, :, idx].astype(bool)
+                    indexes_list = routes[:, :, i].astype(bool)
                     final_output[indexes_list] = output
 
             hidden_states = final_output * route_prob_max
@@ -176,13 +198,13 @@ class TritonPythonModel:
         print('Cleaning up...')
     
     """ % (
-        MODEL_NAME,
+        args.model_name,
         num_experts,
         layer_name,
         layer_idx,
     )
 
-    model_path = os.path.join(MODEL_REPOSITORY, model_name)
+    model_path = os.path.join(args.model_repo, model_name)
     make_dir_if_not_exists(model_path)
     make_dir_if_not_exists(os.path.join(model_path, "0"))
     with open(os.path.join(model_path, "0", "model.py"), "w") as f:
@@ -196,13 +218,13 @@ for layer_idx in range(config.num_layers):
     if layer_idx % 2 == 1:
         generate_preaggregate_config(
             config.num_experts,
-            "%s_encoder_preagg_%d" % (MODEL_NAME, layer_idx),
+            "%s_encoder_preagg_%d" % (args.model_name, layer_idx),
             "encoder",
             layer_idx,
         )
         generate_preaggregate_config(
             config.num_experts,
-            "%s_decoder_preagg_%d" % (MODEL_NAME, layer_idx),
+            "%s_decoder_preagg_%d" % (args.model_name, layer_idx),
             "decoder",
             layer_idx,
         )

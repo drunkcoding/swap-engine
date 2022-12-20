@@ -1,12 +1,18 @@
+from dataclasses import dataclass, field
 import os
 from typing import Union
-from transformers import SwitchTransformersConfig
+from transformers import SwitchTransformersConfig, HfArgumentParser
 
-MODEL_NAME = "switch-base-8"
-# CKPT_PATH = "/mnt/xly/checkpoints/t5x-torchscript/moe/base/e128"
-MODEL_REPOSITORY = "model_repo_switch-base-8"
+@dataclass
+class ModelArguments:
+    model_name: str = field(metadata={"help": "Name of the model from HuggingFace"})
+    def __post_init__(self):
+        self.model_repo = "_".join(["model_repo", self.model_name])
 
-config = SwitchTransformersConfig.from_pretrained(f"google/{MODEL_NAME}")
+parser = HfArgumentParser((ModelArguments,))
+args = parser.parse_args_into_dataclasses()[0]
+
+config = SwitchTransformersConfig.from_pretrained(f"google/{args.model_name}")
 
 def generate_expert_layers(i, num_experts, layer: str):
     layer_cofig = []
@@ -29,7 +35,7 @@ def generate_expert_layers(i, num_experts, layer: str):
         } 
         """
         % (
-            MODEL_NAME,
+            args.model_name,
             layer,
             i,
             "%s_hidden_states_block_%d" % (layer, i),
@@ -57,7 +63,7 @@ def generate_expert_layers(i, num_experts, layer: str):
     #         }
     #         """
     #         % (
-    #             MODEL_NAME,
+    #             args.model_name,
     #             layer,
     #             i,
     #             k,
@@ -89,7 +95,7 @@ def generate_expert_layers(i, num_experts, layer: str):
         }
         """
         % (
-            MODEL_NAME,
+            args.model_name,
             layer,
             i,
             # "".join(
@@ -133,7 +139,7 @@ def generate_ff_layer(i, layer: str):
         } 
         """
         % (
-            MODEL_NAME,
+            args.model_name,
             layer,
             i,
             "%s_hidden_states_block_%d" % (layer, i),
@@ -160,7 +166,7 @@ def generate_final_layer(layer: str):
         } 
         """
         % (
-            MODEL_NAME,
+            args.model_name,
             layer,
             "%s_hidden_states_%d" % (layer, config.num_layers),
             "%s_hidden_states" % layer,
@@ -185,7 +191,7 @@ def generate_lm_head():
         } 
         """
         % (
-            MODEL_NAME,
+            args.model_name,
             "decoder_hidden_states",
             "logits",
         )
@@ -220,7 +226,7 @@ ensemble_steps.append(
     }
 """
     % (
-        MODEL_NAME,
+        args.model_name,
         "encoder_input_ids",
         "encoder_attention_mask",
         "encoder_hidden_states_0",
@@ -257,7 +263,7 @@ for i in range(config.num_layers):
     }
 """
         % (
-            MODEL_NAME,
+            args.model_name,
             i,
             "encoder_hidden_states_%d" % i,
             "encoder_position_bias_%d" % i,
@@ -315,7 +321,7 @@ ensemble_steps.append(
         }
     """
     % (
-        MODEL_NAME,
+        args.model_name,
         "decoder_input_ids",
         "decoder_attention_mask",
         "encoder_attention_mask",
@@ -370,7 +376,7 @@ for i in range(config.num_layers):
             }
         """
         % (
-            MODEL_NAME,
+            args.model_name,
             i,
             "decoder_hidden_states_%d" % i,
             "encoder_hidden_states",
@@ -443,7 +449,7 @@ ensemble_scheduling {
     ]
 }
 """ % (
-    MODEL_NAME,
+    args.model_name,
     config.num_layers * 2,
     config.num_layers,
     ",\n".join(ensemble_steps),
@@ -455,11 +461,11 @@ def make_dir_if_not_exists(path):
 
 
 def save_config(config, model_name):
-    model_path = os.path.join(MODEL_REPOSITORY, model_name)
+    model_path = os.path.join(args.model_repo, model_name)
     make_dir_if_not_exists(model_path)
     make_dir_if_not_exists(os.path.join(model_path, "0"))
     with open(os.path.join(model_path, "config.pbtxt"), "w") as f:
         f.write(config)
 
 
-save_config(CONFIG_ENSEMBLE, f"{MODEL_NAME}-ensemble")
+save_config(CONFIG_ENSEMBLE, f"{args.model_name}-ensemble")

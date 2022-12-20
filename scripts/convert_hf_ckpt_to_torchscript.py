@@ -60,6 +60,24 @@ except:
     partitions = [index_path]
     partitions = dict(zip(["pytorch_model.bin"], partitions))
 
+    model = SwitchTransformersForConditionalGeneration.from_pretrained(
+        args.model_name, cache_dir=args.model_path
+    )
+    model = model.state_dict()
+
+    weight_map = {}
+    for key in list(model.keys()):
+        weight_map[key] = "pytorch_model.bin"
+    
+    file_to_weights = {}
+    for weight_name, file_name in weight_map.items():
+        if file_name not in file_to_weights:
+            file_to_weights[file_name] = []
+        file_to_weights[file_name].append(weight_name)
+
+    del model
+    gc.collect()
+
 print("Model partitions: ", partitions.keys(), flush=True)
 
 config = SwitchTransformersConfig.from_pretrained(
@@ -122,25 +140,51 @@ def load_embed(model_state_dict, layer_type):
     )
 
 
-@ignore_except()
-def load_mlp(model_state_dict, layer_type, layer_idx):
+loaded_partitions = {}
+
+def load_mlp(layer_type, layer_idx):
     key_init = get_key_init(layer_type, layer_idx)
     padding_str = "layer.1." if layer_type == "encoder" else "layer.2."
     key_init = key_init + padding_str
-    if "switch-xxl" in args.model_name or "switch-c" in args.model_name:
-        torch_mlp_layer = {
-            "mlp.wi_0.weight": model_state_dict.pop(key_init + "mlp.wi_0.weight"),
-            "mlp.wi_1.weight": model_state_dict.pop(key_init + "mlp.wi_1.weight"),
-            "mlp.wo.weight": model_state_dict.pop(key_init + "mlp.wo.weight"),
-            "layer_norm.weight": model_state_dict.pop(key_init + "layer_norm.weight"),
-        }
+
+    if "xxl" in args.model_name:
+        wi_0 = weight_map[key_init + "mlp.wi_0.weight"]
+        wi_1 = weight_map[key_init + "mlp.wi_1.weight"]
+        wo = weight_map[key_init + "mlp.wo.weight"]
+        layer_norm = weight_map[key_init + "layer_norm.weight"]
+        files = set([wi_0, wi_1, wo, layer_norm])
     else:
+        wi = weight_map[key_init + "mlp.wi.weight"]
+        wo = weight_map[key_init + "mlp.wo.weight"]
+        layer_norm = weight_map[key_init + "layer_norm.weight"]
+        files = set([wi, wo, layer_norm])
+
+    for f in files:
+        if f not in loaded_partitions:
+            print("loading", f, partitions[f], flush=True)
+            loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+    print("loaded_partitions", loaded_partitions.keys(), flush=True)
+    print("key_init", key_init, "files", files, flush=True)
+    # for f in files:
+    #     print("loaded_partitions", f, loaded_partitions[f].keys(), flush=True)
+
+    if "xxl" in args.model_name:
         torch_mlp_layer = {
-            "mlp.wi_0.weight": model_state_dict.pop(key_init + "mlp.wi.weight"),
-            "mlp.wo.weight": model_state_dict.pop(key_init + "mlp.wo.weight"),
-            "layer_norm.weight": model_state_dict.pop(key_init + "layer_norm.weight"),
+            "mlp.wi_0.weight": loaded_partitions[wi_0].pop(key_init + "mlp.wi_0.weight"),
+            "mlp.wi_1.weight": loaded_partitions[wi_1].pop(key_init + "mlp.wi_1.weight"),
+            "mlp.wo.weight": loaded_partitions[wo].pop(key_init + "mlp.wo.weight"),
+            "layer_norm.weight": loaded_partitions[layer_norm].pop(key_init + "layer_norm.weight"),
         }
+    else:      
+        torch_mlp_layer = {
+            "mlp.wi.weight": loaded_partitions[wi].pop(key_init + "mlp.wi.weight"),
+            "mlp.wo.weight": loaded_partitions[wo].pop(key_init + "mlp.wo.weight"),
+            "layer_norm.weight": loaded_partitions[layer_norm].pop(key_init + "layer_norm.weight"),
+        }
+
     mlp_module = SwitchLayerFF(config, is_gated="xxl" in args.model_name)
+    print("torch_mlp_layer", torch_mlp_layer.keys(), flush=True)
+    print("mlp_module", mlp_module.state_dict().keys(), flush=True)
     mlp_module.load_state_dict(torch_mlp_layer)
 
     export_torchscript_model(
@@ -191,9 +235,14 @@ def load_router(model_state_dict, layer_type, layer_idx):
 
 @ignore_except()
 def load_lm_head(model_state_dict):
-    torch_lm_layer = {
-        "lm_head.weight": model_state_dict.pop("decoder.lm_head.weight"),
-    }
+    if "xxl" in args.model_name:
+        torch_lm_layer = {
+            "lm_head.weight": model_state_dict.pop("decoder.lm_head.weight"),
+        }
+    else:
+        torch_lm_layer = {
+            "lm_head.weight": model_state_dict.pop("lm_head.weight"),
+        }
     lm_module = SwitchLMPredictionHead(config)
     lm_module.load_state_dict(torch_lm_layer)
     export_torchscript_model(
@@ -224,9 +273,9 @@ def load_partition(partition):
             load_router(model_state_dict, "decoder", i)
             # load_experts(model_state_dict, "encoder", i)
             # load_experts(model_state_dict, "decoder", i)
-        else:
-            load_mlp(model_state_dict, "encoder", i)
-            load_mlp(model_state_dict, "decoder", i)
+        # else:
+        #     load_mlp(model_state_dict, "encoder", i)
+        #     load_mlp(model_state_dict, "decoder", i)
 
     load_final_layer(model_state_dict, "encoder")
     load_final_layer(model_state_dict, "decoder")
@@ -236,10 +285,8 @@ def load_partition(partition):
     return {}
 
 
-# pool = mp.Pool(processes=mp.cpu_count())
-# model_states = pool.map(load_partition, partitions.items())
-
-loaded_partitions = {}
+pool = mp.Pool(processes=mp.cpu_count())
+model_states = pool.map(load_partition, partitions.items())
 
 
 def load_experts(layer_type, layer_idx):
@@ -385,7 +432,7 @@ def load_block(layer_type, layer_idx):
             cross_attention_key_o
         )
 
-        cross_attention_layer_norm_key = key_init + "layer.2.layer_norm.weight"
+        cross_attention_layer_norm_key = key_init + "layer.1.layer_norm.weight"
         file = weight_map[cross_attention_layer_norm_key]
         if file not in loaded_partitions:
             loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
@@ -417,15 +464,23 @@ def load_block(layer_type, layer_idx):
     )
 
 
-for i in range(config.num_layers // 2):
+# for partition in partitions.items():
+#     p_file, p_path = partition
+#     model_state_dict = torch.load(p_path, map_location="cpu")
+#     print(p_file, model_state_dict.keys())
+#     # load_partition(partition)
+
+for i in range(config.num_layers):
     load_block("encoder", i)
     load_block("decoder", i)
-    # if i % 2 == 1:
-    #     load_experts("encoder", i)
-    #     load_experts("decoder", i)
+    if i % 2 == 1:
+        load_experts("encoder", i)
+        load_experts("decoder", i)
+    else:
+        load_mlp("encoder", i)
+        load_mlp("decoder", i)
 
     gc.collect()
-# for partition in partitions:
 
 # for i in range(config.num_layers):
 #     key_init = "encoder.block.%d." % i
