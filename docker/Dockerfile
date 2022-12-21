@@ -8,4 +8,5 @@ ENV LD_LIBRARY_PATH=LD_LIBRARY_PATH:/root/lib
 
 RUN pip install tritonclient[all]
 
-RUN apt-get install -y datacenter-gpu-manager
+RUN apt install -y gdb
+RUN apt-get install -y datacenter-gpu-manager 

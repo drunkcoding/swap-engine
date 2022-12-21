@@ -128,12 +128,11 @@ class TritonPythonModel:
             # print("route_prob_max", route_prob_max, flush=True)
             batch_size, seq_len, d_model = hidden_states.shape
         
-            request_id = request.request_id()
-            req_id_md5 = hashlib.md5(str(request_id).encode()).hexdigest()
-
-            np.save(f"{self.data_path}/routes_{self.layer_name}_{self.layer_idx}_{req_id_md5}", routes, allow_pickle=False)
-            np.save(f"{self.data_path}/hidden_states_{self.layer_name}_{self.layer_idx}_{req_id_md5}", hidden_states, allow_pickle=False)
-            np.save(f"{self.data_path}/route_prob_max_{self.layer_name}_{self.layer_idx}_{req_id_md5}", route_prob_max, allow_pickle=False)
+            # request_id = request.request_id()
+            # req_id_md5 = hashlib.md5(str(request_id).encode()).hexdigest()
+            # np.save(f"{self.data_path}/routes_{self.layer_name}_{self.layer_idx}_{req_id_md5}", routes, allow_pickle=False)
+            # np.save(f"{self.data_path}/hidden_states_{self.layer_name}_{self.layer_idx}_{req_id_md5}", hidden_states, allow_pickle=False)
+            # np.save(f"{self.data_path}/route_prob_max_{self.layer_name}_{self.layer_idx}_{req_id_md5}", route_prob_max, allow_pickle=False)
             
             expert_outputs = [None] * self.num_experts
             model_name = f"expert-{self.layer_name}-{self.layer_idx}"
@@ -211,8 +210,8 @@ class TritonPythonModel:
         f.write(code)
 
 
-config = SwitchTransformersConfig.from_pretrained("google/switch-base-8")
-
+config = SwitchTransformersConfig.from_pretrained(f"google/{args.model_name}")
+print(config)
 for layer_idx in range(config.num_layers):
     # code generation
     if layer_idx % 2 == 1:
