@@ -23,12 +23,58 @@ class ModelArguments:
     model_name: str = field(metadata={"help": "Name of the model from HuggingFace"})
     num_processes: int = field(metadata={"help": "Number of processes to use"})
     batch_size: int = field(default=8, metadata={"help": "Batch size to use"})
+    dataset: str = field(default="glue", metadata={"help": "Dataset to use"})
+    task: str = field(default=None, metadata={"help": "Task to use"})
 
 parser = HfArgumentParser((ModelArguments,))
 args = parser.parse_args_into_dataclasses()[0]
 
 torch.set_printoptions(profile="full")
-sentence1_key, sentence2_key = "premise", "hypothesis"
+
+if  args.dataset == "glue" and "mnli" in args.task:
+    sentence1_key, sentence2_key = "premise", "hypothesis"
+elif args.dataset == "glue" and args.task == "rte":
+    sentence1_key, sentence2_key = "sentence1", "sentence2"
+elif args.dataset == "glue" and args.task == "sst2":
+    sentence1_key, sentence2_key = "sentence", None
+elif args.dataset == "glue" and args.task == "cola":
+    sentence1_key, sentence2_key = "sentence", None
+elif args.dataset == "glue" and args.task == "mrpc":
+    sentence1_key, sentence2_key = "sentence1", "sentence2"
+elif args.dataset == "glue" and args.task == "qqp":
+    sentence1_key, sentence2_key = "question1", "question2"
+elif args.dataset == "glue" and args.task == "qnli":
+    sentence1_key, sentence2_key = "question", "sentence"
+elif args.dataset == "glue" and args.task == "stsb":
+    sentence1_key, sentence2_key = "sentence1", "sentence2"
+elif args.dataset == "glue" and args.task == "wnli":
+    sentence1_key, sentence2_key = "sentence1", "sentence2"
+elif args.dataset == "super_glue" and args.task == "boolq":
+    sentence1_key, sentence2_key = "question", "passage"
+elif args.dataset == "super_glue" and args.task == "cb":
+    sentence1_key, sentence2_key = "premise", "hypothesis"
+elif args.dataset == "super_glue" and args.task == "copa":
+    sentence1_key, sentence2_key = "premise", "choice1"
+elif args.dataset == "super_glue" and args.task == "multirc":
+    sentence1_key, sentence2_key = "passage", "question"
+elif args.dataset == "super_glue" and args.task == "record":
+    sentence1_key, sentence2_key = "passage", "question"
+elif args.dataset == "super_glue" and args.task == "rte":
+    sentence1_key, sentence2_key = "sentence1", "sentence2"
+elif args.dataset == "super_glue" and args.task == "wic":
+    sentence1_key, sentence2_key = "sentence1", "sentence2"
+elif args.dataset == "super_glue" and args.task == "wsc":
+    sentence1_key, sentence2_key = "text", "target"
+elif args.dataset == "super_glue" and args.task == "wsc.fixed":
+    sentence1_key, sentence2_key = "text", "target"
+elif args.dataset == "super_glue" and args.task == "axg":
+    sentence1_key, sentence2_key = "premise", "hypothesis"
+elif args.dataset == "super_glue" and args.task == "axb":
+    sentence1_key, sentence2_key = "premise", "hypothesis"
+elif args.dataset == "squad":
+    sentence1_key, sentence2_key = "context", "question"
+else:
+    raise ValueError(f"Unknown dataset/task combination: {args.dataset}/{args.task}")
 
 def format_triton_input(input: np.ndarray, name: str):
     triton_input = grpcclient.InferInput(
@@ -59,17 +105,17 @@ def preprocess_function(examples):
     return result
 
 
-raw_datasets = datasets.load_dataset("glue", "mnli")
+raw_datasets = datasets.load_dataset(args.dataset, args.task)
 tokenizer = T5Tokenizer.from_pretrained("t5-small")
 
 processed_datasets = raw_datasets.map(
     preprocess_function,
     batched=True,
-    remove_columns=raw_datasets["train"].column_names,
+    remove_columns=raw_datasets["test"].column_names,
     desc="Running tokenizer on dataset",
 )
 
-train_dataset = processed_datasets["train"]
+train_dataset = processed_datasets["test"]
 print(train_dataset)
 
 URL = "localhost:8001"
@@ -101,6 +147,7 @@ def query_server():
             triton_inputs,
             outputs=triton_outputs,
             request_id=uuid.uuid4().hex,
+            sequence_id=0,
         )
         end_time = time.perf_counter()
         times.append(end_time - start_time)

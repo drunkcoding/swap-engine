@@ -114,7 +114,6 @@ class EncoderTokenEmbeddings(nn.Module):
 
         input_shape = encoder_input_ids.size()
         input_ids = encoder_input_ids.view(-1, input_shape[-1])
-        encoder_hidden_states = self.embed_tokens(input_ids)
 
         batch_size, seq_length = input_shape
 
@@ -124,7 +123,7 @@ class EncoderTokenEmbeddings(nn.Module):
             encoder_attention_mask, input_shape, is_decoder=False
         )
         encoder_position_bias = torch.empty((batch_size, self.num_heads, seq_length, 1))
-        encoder_hidden_states = self.dropout(encoder_hidden_states)
+        encoder_hidden_states = self.dropout(self.embed_tokens(input_ids))
 
         return (
             encoder_hidden_states,
@@ -197,7 +196,9 @@ class SwitchRouter(nn.Module):
             distrib_upper_bound = 1.0 + self.jitter_noise
 
             uniform_distrib = torch.rand(
-                hidden_states.shape, device=hidden_states.device, dtype=hidden_states.dtype
+                hidden_states.shape,
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
             )
             uniform_distrib = uniform_distrib * (
                 distrib_lower_bound - distrib_upper_bound
@@ -233,6 +234,7 @@ class SwitchRouter(nn.Module):
         router_probs = torch.max(router_probs, dim=-1).values.unsqueeze(-1)
         return expert_index, router_probs
 
+
 class SwitchLMPredictionHead(nn.Module):
     def __init__(self, config: SwitchTransformersConfig):
         super().__init__()
@@ -240,6 +242,7 @@ class SwitchLMPredictionHead(nn.Module):
 
     def forward(self, hidden_states):
         return self.lm_head(hidden_states)
+
 
 class SwitchLayerFF(nn.Module):
     def __init__(self, config: SwitchTransformersConfig, is_gated: bool = False):
@@ -254,21 +257,22 @@ class SwitchLayerFF(nn.Module):
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(self, hidden_states):
-        forwarded_states = self.layer_norm(hidden_states)
-        forwarded_states = self.mlp(forwarded_states)
-        hidden_states = hidden_states + self.dropout(forwarded_states)
+        hidden_states = hidden_states + self.dropout(
+            self.mlp(self.layer_norm(hidden_states))
+        )
         return hidden_states
+
 
 class SwitchFinalLayerNorm(nn.Module):
     def __init__(self, config: SwitchTransformersConfig):
         super().__init__()
-        self.layer_norm = SwitchTransformersLayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = SwitchTransformersLayerNorm(
+            config.d_model, eps=config.layer_norm_epsilon
+        )
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(self, hidden_states):
-        hidden_states = self.layer_norm(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        return hidden_states
+        return self.dropout(self.layer_norm(hidden_states))
 
 
 class SwitchAttention(nn.Module):
@@ -347,25 +351,30 @@ class SwitchAttention(nn.Module):
         key_length = real_seq_length if not is_decoder else key_value_states.shape[1]
 
         # get query states
-        query_states = self.shape(
-            self.q(hidden_states), batch_size
-        )  # (batch_size, n_heads, seq_length, dim_per_head)
+        # query_states = self.shape(
+        #     self.q(hidden_states), batch_size
+        # )  # (batch_size, n_heads, seq_length, dim_per_head)
 
-        key_states = self.shape(
-            self.k(key_value_states if is_decoder else hidden_states),
-            batch_size,
-        )
-        value_states = self.shape(
-            self.v(key_value_states if is_decoder else hidden_states),
-            batch_size,
-        )
+        # key_states = self.shape(
+        #     self.k(key_value_states if is_decoder else hidden_states),
+        #     batch_size,
+        # )
+        # value_states = self.shape(
+        #     self.v(key_value_states if is_decoder else hidden_states),
+        #     batch_size,
+        # )
 
         # compute scores
-        scores = torch.matmul(
-            query_states, key_states.transpose(3, 2)
+        scores = (
+            torch.matmul(
+                self.shape(self.q(hidden_states), batch_size),
+                self.shape(
+                    self.k(key_value_states if is_decoder else hidden_states),
+                    batch_size,
+                ).transpose(3, 2),
+            )
+            + position_bias
         )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
-
-        scores += position_bias
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
             scores
         )  # (batch_size, n_heads, seq_length, key_length)
@@ -374,7 +383,14 @@ class SwitchAttention(nn.Module):
         )  # (batch_size, n_heads, seq_length, key_length)
 
         attn_output = self.unshape(
-            torch.matmul(attn_weights, value_states), batch_size
+            torch.matmul(
+                attn_weights,
+                self.shape(
+                    self.v(key_value_states if is_decoder else hidden_states),
+                    batch_size,
+                ),
+            ),
+            batch_size,
         )  # (batch_size, seq_length, dim)
         attn_output = self.o(attn_output)
         outputs = (attn_output,) + (position_bias,)
@@ -509,40 +525,26 @@ class SwitchAttentionRelative(SwitchAttention):
 
         key_length = real_seq_length if not is_decoder else key_value_states.shape[1]
 
-        # get query states
-        query_states = self.shape(
-            self.q(hidden_states), batch_size
-        )  # (batch_size, n_heads, seq_length, dim_per_head)
-
-        # get key/value states
-        # if key_value_states is None:
-        #     # self-attn
-        #     # (batch_size, n_heads, seq_length, dim_per_head)
-        #     key_states = self.shape(self.k(hidden_states), batch_size)
-        # elif past_key_value is None:
-        #     # cross-attn
-        #     # (batch_size, n_heads, seq_length, dim_per_head)
-        #     key_states = self.shape(self.k(key_value_states), batch_size)
-        key_states = self.shape(
-            self.k(key_value_states if is_decoder else hidden_states),
-            batch_size,
-        )
-        value_states = self.shape(
-            self.v(key_value_states if is_decoder else hidden_states),
-            batch_size,
-        )
-        # key_states = self.project(
-        #     hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
-        #     , batch_size
+        # # get query states
+        # query_states = self.shape(
+        #     self.q(hidden_states), batch_size
+        # )  # (batch_size, n_heads, seq_length, dim_per_head)
+        # key_states = self.shape(
+        #     self.k(key_value_states if is_decoder else hidden_states),
+        #     batch_size,
         # )
-        # value_states = self.project(
-        #     hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
-        #     , batch_size
+        # value_states = self.shape(
+        #     self.v(key_value_states if is_decoder else hidden_states),
+        #     batch_size,
         # )
 
         # compute scores
         scores = torch.matmul(
-            query_states, key_states.transpose(3, 2)
+            self.shape(self.q(hidden_states), batch_size),
+            self.shape(
+                self.k(key_value_states if is_decoder else hidden_states),
+                batch_size,
+            ).transpose(3, 2),
         )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
 
         if not is_decoder:
@@ -570,10 +572,18 @@ class SwitchAttentionRelative(SwitchAttention):
         # if layer_head_mask is not None:
         #     attn_weights = attn_weights * layer_head_mask
 
-        attn_output = self.unshape(
-            torch.matmul(attn_weights, value_states), batch_size
-        )  # (batch_size, seq_length, dim)
-        attn_output = self.o(attn_output)
+        attn_output = self.o(
+            self.unshape(
+                torch.matmul(
+                    attn_weights,
+                    self.shape(
+                        self.v(key_value_states if is_decoder else hidden_states),
+                        batch_size,
+                    ),
+                ),
+                batch_size,
+            )  # (batch_size, seq_length, dim)
+        )
 
         # present_key_value_state = (
         #     (key_states, value_states) if (self.is_decoder and use_cache) else None
@@ -585,6 +595,7 @@ class SwitchAttentionRelative(SwitchAttention):
         #     outputs = outputs + (attn_weights,)
         return outputs
 
+
 class T5LayerSelfAttention(nn.Module):
     def __init__(self, config, has_relative_attention_bias=False):
         super().__init__()
@@ -594,7 +605,9 @@ class T5LayerSelfAttention(nn.Module):
             if has_relative_attention_bias
             else SwitchAttention(config)
         )
-        self.layer_norm = SwitchTransformersLayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = SwitchTransformersLayerNorm(
+            config.d_model, eps=config.layer_norm_epsilon
+        )
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
@@ -603,18 +616,24 @@ class T5LayerSelfAttention(nn.Module):
         attention_mask,
         position_bias,
     ):
-        normed_hidden_states = self.layer_norm(hidden_states)
         attention_output = self.SelfAttention(
-            normed_hidden_states, attention_mask, position_bias, torch.empty(0), False
+            self.layer_norm(hidden_states),
+            attention_mask,
+            position_bias,
+            torch.empty(0),
+            False,
         )
         hidden_states = hidden_states + self.dropout(attention_output[0])
         return hidden_states, attention_output[1]  # hidden_states, position_bias
+
 
 class T5LayerCrossAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.EncDecAttention = SwitchAttention(config)
-        self.layer_norm = SwitchTransformersLayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = SwitchTransformersLayerNorm(
+            config.d_model, eps=config.layer_norm_epsilon
+        )
         self.dropout = nn.Dropout(config.dropout_rate)
 
     def forward(
@@ -624,9 +643,8 @@ class T5LayerCrossAttention(nn.Module):
         encoder_extended_attention_mask,
         encoder_decoder_position_bias,
     ):
-        normed_hidden_states = self.layer_norm(decoder_hidden_states)
         attention_output = self.EncDecAttention(
-            normed_hidden_states,
+            self.layer_norm(decoder_hidden_states),
             encoder_extended_attention_mask,
             encoder_decoder_position_bias,
             encoder_hidden_states,
@@ -639,7 +657,6 @@ class T5LayerCrossAttention(nn.Module):
             decoder_hidden_states,
             attention_output[1],
         )  # decoder_hidden_states, encoder_decoder_position_bias
-
 
 
 class SwitchEncoderBlock(nn.Module):
@@ -660,13 +677,11 @@ class SwitchEncoderBlock(nn.Module):
         encoder_position_bias,
         extended_attention_mask,
     ):
-        encoder_hidden_states, encoder_position_bias = self.attention(
+        return self.attention(
             encoder_hidden_states,
             extended_attention_mask,
             encoder_position_bias,
         )  # encoder_hidden_states, position_bias
-
-        return encoder_hidden_states, encoder_position_bias
 
 
 class SwitchDecoderBlock(nn.Module):
@@ -677,9 +692,7 @@ class SwitchDecoderBlock(nn.Module):
         self.has_relative_attention_bias = (
             has_relative_attention_bias  # the first block has relative attention bias
         )
-        self.attention = T5LayerSelfAttention(
-            config, has_relative_attention_bias
-        )
+        self.attention = T5LayerSelfAttention(config, has_relative_attention_bias)
         self.cross_attention = T5LayerCrossAttention(config)
 
     def forward(

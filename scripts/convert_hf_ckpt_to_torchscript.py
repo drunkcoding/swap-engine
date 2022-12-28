@@ -285,7 +285,7 @@ def load_partition(partition):
     return {}
 
 
-pool = mp.Pool(processes=mp.cpu_count())
+pool = mp.Pool(processes=5)
 model_states = pool.map(load_partition, partitions.items())
 
 

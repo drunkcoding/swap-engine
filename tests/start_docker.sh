@@ -4,7 +4,7 @@ docker run --privileged --gpus='"device=0"' \
     --name tritonserver_custom \
     --shm-size=10gb \
     -d --net=host \
-    -v ${PWD}/model_repo_switch-base-128:/models \
+    -v ${PWD}/model_repo_switch-large-128:/models \
     -v ${HOME}/core/build/install/lib:/opt/tritonserver/lib \
     -v ${HOME}/pytorch_backend/build/install/backends/pytorch:/opt/tritonserver/backends/pytorch \
     -v ${HOME}/muduo/build/lib:/root/lib \
@@ -19,7 +19,7 @@ docker run --privileged --gpus='"device=0"' \
 # docker run --privileged --gpus='"device=0"' \
 #     --name tritonserver_custom \
 #     --shm-size=10gb \
-#     -dit --net=host \
+#     -it --rm --net=host \
 #     -v ${PWD}/model_repo_switch-base-8:/models \
 #     -v ${HOME}/core/build/install/lib:/opt/tritonserver/lib \
 #     -v ${HOME}/pytorch_backend/build/install/backends/pytorch:/opt/tritonserver/backends/pytorch \
