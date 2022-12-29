@@ -1,10 +1,13 @@
+MODEL=$1
+VERBOSE=$2
+
 docker stop tritonserver_custom
 docker rm tritonserver_custom
 docker run --privileged --gpus='"device=0"' \
     --name tritonserver_custom \
     --shm-size=10gb \
     -d --net=host \
-    -v ${PWD}/model_repo_switch-large-128:/models \
+    -v ${PWD}/model_repo_${MODEL}:/models \
     -v ${HOME}/core/build/install/lib:/opt/tritonserver/lib \
     -v ${HOME}/pytorch_backend/build/install/backends/pytorch:/opt/tritonserver/backends/pytorch \
     -v ${HOME}/muduo/build/lib:/root/lib \
@@ -14,7 +17,7 @@ docker run --privileged --gpus='"device=0"' \
         --allow-metrics false \
         --model-control-mode explicit \
         --load-model=* \
-        --log-verbose 10
+        --log-verbose ${VERBOSE}
 
 # docker run --privileged --gpus='"device=0"' \
 #     --name tritonserver_custom \

@@ -48,11 +48,6 @@ output [
     dims: [ -1, -1, -1 ]
     },
     {
-    name: "extended_encoder_attention_mask"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
-    },
-    {
     name: "encoder_position_bias"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1, -1 ]
@@ -92,17 +87,12 @@ output [
     dims: [ -1, -1, -1 ]
     },
     {
-    name: "encoder_extended_attention_mask"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
-    },
-    {
-    name: "extended_decoder_attention_mask"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
-    },
-    {
     name: "decoder_position_bias"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1, -1 ]
+    },
+    {
+    name: "encoder_decoder_position_bias"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1, -1 ]
     }
@@ -146,6 +136,11 @@ input [
 ]
 output [
     {
+    name: "forwarded_states"
+    data_type: TYPE_FP32
+    dims: [ -1 , -1, -1 ]
+    },
+    {
     name: "routes"
     data_type: TYPE_INT64
     dims: [ -1 , -1, -1 ]
@@ -172,7 +167,7 @@ input [
 ]
 output [
     {
-    name: "hidden_states"
+    name: "logits"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1 ]
     }
@@ -216,11 +211,6 @@ input [
     name: "encoder_position_bias"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1, -1 ]
-    },
-    {
-    name: "encoder_extended_attention_mask"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
     }
 ]
 output [
@@ -228,11 +218,6 @@ output [
     name: "encoder_hidden_states"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1 ]
-    },
-    {
-    name: "encoder_position_bias"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
     }
 ]
 """
@@ -255,16 +240,6 @@ input [
     dims: [ -1, -1, -1 ]
     },
     {
-    name: "decoder_extended_attention_mask"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
-    },
-    {
-    name: "encoder_extended_attention_mask"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
-    },
-    {
     name: "decoder_position_bias"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1, -1 ]
@@ -280,16 +255,6 @@ output [
     name: "decoder_hidden_states"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1 ]
-    },
-    {
-    name: "decoder_position_bias"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
-    },
-    {
-    name: "encoder_decoder_position_bias"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
     }
 ]
 """

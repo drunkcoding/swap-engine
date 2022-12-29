@@ -26,6 +26,14 @@ class ModelArguments:
     dataset: str = field(default="glue", metadata={"help": "Dataset to use"})
     task: str = field(default=None, metadata={"help": "Task to use"})
 
+    def __post_init__(self):
+        if self.task == "mnli":
+            self.task = "mnli_matched"
+        if self.dataset == "squad":
+            self.split = "validation"
+        else:
+            self.split = "test"
+
 parser = HfArgumentParser((ModelArguments,))
 args = parser.parse_args_into_dataclasses()[0]
 
@@ -56,7 +64,7 @@ elif args.dataset == "super_glue" and args.task == "cb":
 elif args.dataset == "super_glue" and args.task == "copa":
     sentence1_key, sentence2_key = "premise", "choice1"
 elif args.dataset == "super_glue" and args.task == "multirc":
-    sentence1_key, sentence2_key = "passage", "question"
+    sentence1_key, sentence2_key = "paragraph", "question"
 elif args.dataset == "super_glue" and args.task == "record":
     sentence1_key, sentence2_key = "passage", "question"
 elif args.dataset == "super_glue" and args.task == "rte":
@@ -104,18 +112,22 @@ def preprocess_function(examples):
 
     return result
 
-
 raw_datasets = datasets.load_dataset(args.dataset, args.task)
+
+print(raw_datasets)
+
 tokenizer = T5Tokenizer.from_pretrained("t5-small")
+
+
 
 processed_datasets = raw_datasets.map(
     preprocess_function,
     batched=True,
-    remove_columns=raw_datasets["test"].column_names,
+    remove_columns=raw_datasets[args.split].column_names,
     desc="Running tokenizer on dataset",
 )
 
-train_dataset = processed_datasets["test"]
+train_dataset = processed_datasets[args.split]
 print(train_dataset)
 
 URL = "localhost:8001"
@@ -136,8 +148,10 @@ def query_server():
         triton_inputs = [
             format_triton_input(input_ids, "encoder_input_ids"),
             format_triton_input(attention_mask, "encoder_attention_mask"),
-            format_triton_input(np.zeros((1, 1)).astype(np.int32), "decoder_input_ids"),
-            format_triton_input(np.ones((1, 1)).astype(np.int32), "decoder_attention_mask"),
+            # format_triton_input(np.zeros((input_ids.shape[0], 1)).astype(np.int32), "decoder_input_ids"),
+            # format_triton_input(np.ones((input_ids.shape[0], 1)).astype(np.int32), "decoder_attention_mask"),
+            format_triton_input(np.random.randint(0, 30000, (input_ids.shape[0], np.sum(attention_mask))).astype(np.int32), "decoder_input_ids"),
+            format_triton_input(np.ones((input_ids.shape[0], np.sum(attention_mask))).astype(np.int32), "decoder_attention_mask"),
         ]
         triton_outputs = [format_triton_output("logits")]
 

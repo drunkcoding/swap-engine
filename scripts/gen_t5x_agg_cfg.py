@@ -23,6 +23,7 @@ import os
 import hashlib
 import tritonclient
 import tritonclient.grpc as grpcclient
+import tritonclient.http as httpclient
 
 class TritonPythonModel:
     @staticmethod
@@ -31,6 +32,11 @@ class TritonPythonModel:
         inputs = [
             {
                 'name': "hidden_states",
+                'data_type': 'TYPE_FP32',
+                'dims': [ -1, -1, -1 ],
+            },
+            {
+                'name': "forwarded_states",
                 'data_type': 'TYPE_FP32',
                 'dims': [ -1, -1, -1 ],
             },
@@ -95,8 +101,8 @@ class TritonPythonModel:
         self.layer_name =  "%s"
         self.layer_idx = %d
 
-        self.client = grpcclient.InferenceServerClient(
-            url="localhost:8001", verbose=False
+        self.client = httpclient.InferenceServerClient(
+            url="localhost:8000", verbose=False, concurrency=self.num_experts
         )
 
         self.data_path = f"/opt/data/{self.backend_name}"
@@ -105,9 +111,7 @@ class TritonPythonModel:
             os.mkdir(self.data_path)
         except:
             pass
-    
-    def dummy_callback(self, result, error):
-        pass
+
 
     def execute(self, requests):
         responses = []
@@ -121,6 +125,8 @@ class TritonPythonModel:
         for request in requests:
             # Perform inference on the request and append it to responses list...
             routes = pb_utils.get_input_tensor_by_name(request, "routes").as_numpy()
+            forwarded_states = pb_utils.get_input_tensor_by_name(request, "forwarded_states").as_numpy()
+            # print("forwarded_states", forwarded_states, flush=True)
             # print("routes", routes, flush=True)
             hidden_states = pb_utils.get_input_tensor_by_name(request, "hidden_states").as_numpy()
             # print("hidden_states", hidden_states, flush=True)
@@ -128,20 +134,22 @@ class TritonPythonModel:
             # print("route_prob_max", route_prob_max, flush=True)
             batch_size, seq_len, d_model = hidden_states.shape
         
-            # request_id = request.request_id()
-            # req_id_md5 = hashlib.md5(str(request_id).encode()).hexdigest()
-            # np.save(f"{self.data_path}/routes_{self.layer_name}_{self.layer_idx}_{req_id_md5}", routes, allow_pickle=False)
+        
+            request_id = request.request_id()
+            req_id_md5 = hashlib.md5(str(request_id).encode()).hexdigest()
+            np.save(f"{self.data_path}/routes_{self.layer_name}_{self.layer_idx}_{req_id_md5}", routes, allow_pickle=False)
             # np.save(f"{self.data_path}/hidden_states_{self.layer_name}_{self.layer_idx}_{req_id_md5}", hidden_states, allow_pickle=False)
             # np.save(f"{self.data_path}/route_prob_max_{self.layer_name}_{self.layer_idx}_{req_id_md5}", route_prob_max, allow_pickle=False)
             
             expert_outputs = [None] * self.num_experts
             model_name = f"expert-{self.layer_name}-{self.layer_idx}"
             sequence_id = request.correlation_id()
-            request_id = request.request_id()
+
+
             for i in range(self.num_experts):
                 indexes_list = routes[:, :, i].astype(bool)
                 if np.any(indexes_list):
-                    token_features = hidden_states[indexes_list]
+                    token_features = forwarded_states[indexes_list]
                     # print("token_features", token_features, flush=True)
                     token_features = self.prepare_input("hidden_states", token_features)
                     # expert_routes = self.prepare_input("routes", routes)
@@ -150,21 +158,20 @@ class TritonPythonModel:
                     expert_outputs[i] = self.client.async_infer(
                         f"{self.backend_name}_{self.layer_name}_expert_{self.layer_idx}_{i}",
                         [token_features],
-                        self.dummy_callback,
                         outputs=[output],
                         request_id=request_id,
                         sequence_id=(sequence_id & 0xFFFFFFFF) | ((i+1) << 32),
                     )
 
-            final_output = hidden_states.copy()
             for i in range(self.num_experts):
-                if expert_outputs[i] is not None:
+                indexes_list = routes[:, :, i].astype(bool)
+                if np.any(indexes_list):
                     output = expert_outputs[i].get_result()
                     output = output.as_numpy("hidden_states")
-                    indexes_list = routes[:, :, i].astype(bool)
-                    final_output[indexes_list] = output
+                    forwarded_states[indexes_list] = output
+                    # print("output", i, forwarded_states[indexes_list], flush=True)
 
-            hidden_states = final_output * route_prob_max
+            hidden_states = hidden_states + route_prob_max * forwarded_states
 
             # print(hidden_states, flush=True)
             
@@ -179,7 +186,7 @@ class TritonPythonModel:
         return responses
 
     def prepare_input(self, name: str, input: np.ndarray):
-        triton_input = grpcclient.InferInput(
+        triton_input = httpclient.InferInput(
             name,
             input.shape,
             tritonclient.utils.np_to_triton_dtype(input.dtype),
@@ -188,7 +195,7 @@ class TritonPythonModel:
         return triton_input
 
     def prepare_output(self, name: str):
-        triton_output = grpcclient.InferRequestedOutput(
+        triton_output = httpclient.InferRequestedOutput(
             name,
         )
         return triton_output

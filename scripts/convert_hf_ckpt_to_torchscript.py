@@ -68,7 +68,7 @@ except:
     weight_map = {}
     for key in list(model.keys()):
         weight_map[key] = "pytorch_model.bin"
-    
+
     file_to_weights = {}
     for weight_name, file_name in weight_map.items():
         if file_name not in file_to_weights:
@@ -83,6 +83,17 @@ print("Model partitions: ", partitions.keys(), flush=True)
 config = SwitchTransformersConfig.from_pretrained(
     args.model_name, cache_dir=args.model_path
 )
+
+encoder_config = copy.deepcopy(config)
+encoder_config.is_decoder = False
+encoder_config.use_cache = False
+encoder_config.is_encoder_decoder = False
+
+decoder_config = copy.deepcopy(config)
+decoder_config.is_decoder = True
+decoder_config.is_encoder_decoder = False
+decoder_config.num_layers = config.num_decoder_layers
+
 # model = SwitchTransformersForConditionalGeneration.from_pretrained(
 #     args.model_name, cache_dir=args.model_path, low_memory_mode=True
 # )
@@ -124,23 +135,23 @@ def load_missing_keys(keys):
     return missing_dict
 
 
-@ignore_except()
-def load_embed(model_state_dict, layer_type):
-    state_dict = {"embed_tokens.weight": model_state_dict["shared.weight"]}
-    embed_cls = (
-        EncoderTokenEmbeddings if layer_type == "encoder" else DecoderTokenEmbeddings
-    )
-    embed = embed_cls(config)
-    embed.load_state_dict(state_dict)
-    export_torchscript_model(
-        embed,
-        args.model_repo,
-        "%s_%s_embed" % (args.model_tag, layer_type),
-        getattr(ckpt_config, f"get_t5x_{layer_type}_embed_triton_config")(),
-    )
+# @ignore_except()
 
 
 loaded_partitions = {}
+
+def load_partition(f):
+    global loaded_partitions
+    if f in loaded_partitions:
+        return loaded_partitions[f]
+    loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+
+def load_partitions(files):
+    global loaded_partitions
+    for f in files:
+        if f in loaded_partitions:
+            continue
+        loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
 
 def load_mlp(layer_type, layer_idx):
     key_init = get_key_init(layer_type, layer_idx)
@@ -159,10 +170,7 @@ def load_mlp(layer_type, layer_idx):
         layer_norm = weight_map[key_init + "layer_norm.weight"]
         files = set([wi, wo, layer_norm])
 
-    for f in files:
-        if f not in loaded_partitions:
-            print("loading", f, partitions[f], flush=True)
-            loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+    load_partitions(files)
     print("loaded_partitions", loaded_partitions.keys(), flush=True)
     print("key_init", key_init, "files", files, flush=True)
     # for f in files:
@@ -170,19 +178,30 @@ def load_mlp(layer_type, layer_idx):
 
     if "xxl" in args.model_name:
         torch_mlp_layer = {
-            "mlp.wi_0.weight": loaded_partitions[wi_0].pop(key_init + "mlp.wi_0.weight"),
-            "mlp.wi_1.weight": loaded_partitions[wi_1].pop(key_init + "mlp.wi_1.weight"),
+            "mlp.wi_0.weight": loaded_partitions[wi_0].pop(
+                key_init + "mlp.wi_0.weight"
+            ),
+            "mlp.wi_1.weight": loaded_partitions[wi_1].pop(
+                key_init + "mlp.wi_1.weight"
+            ),
             "mlp.wo.weight": loaded_partitions[wo].pop(key_init + "mlp.wo.weight"),
-            "layer_norm.weight": loaded_partitions[layer_norm].pop(key_init + "layer_norm.weight"),
+            "layer_norm.weight": loaded_partitions[layer_norm].pop(
+                key_init + "layer_norm.weight"
+            ),
         }
-    else:      
+    else:
         torch_mlp_layer = {
             "mlp.wi.weight": loaded_partitions[wi].pop(key_init + "mlp.wi.weight"),
             "mlp.wo.weight": loaded_partitions[wo].pop(key_init + "mlp.wo.weight"),
-            "layer_norm.weight": loaded_partitions[layer_norm].pop(key_init + "layer_norm.weight"),
+            "layer_norm.weight": loaded_partitions[layer_norm].pop(
+                key_init + "layer_norm.weight"
+            ),
         }
 
-    mlp_module = SwitchLayerFF(config, is_gated="xxl" in args.model_name)
+    mlp_module = SwitchLayerFF(
+        encoder_config if layer_type == "encoder" else decoder_config,
+        is_gated="xxl" in args.model_name,
+    )
     print("torch_mlp_layer", torch_mlp_layer.keys(), flush=True)
     print("mlp_module", mlp_module.state_dict().keys(), flush=True)
     mlp_module.load_state_dict(torch_mlp_layer)
@@ -197,7 +216,9 @@ def load_mlp(layer_type, layer_idx):
 
 @ignore_except()
 def load_final_layer(model_state_dict, layer_type):
-    final_layer = SwitchFinalLayerNorm(config)
+    final_layer = SwitchFinalLayerNorm(
+        encoder_config if layer_type == "encoder" else decoder_config
+    )
     torch_final_layer = {
         "layer_norm.weight": model_state_dict.pop(
             "%s.final_layer_norm.weight" % layer_type
@@ -212,45 +233,7 @@ def load_final_layer(model_state_dict, layer_type):
     )
 
 
-@ignore_except()
-def load_router(model_state_dict, layer_type, layer_idx):
-    key_init = get_key_init(layer_type, layer_idx)
-    padding_str = "layer.1." if layer_type == "encoder" else "layer.2."
-    key_init = key_init + padding_str
 
-    router_module = SwitchRouter(config)
-    torch_router_layer = {
-        "classifier.weight": model_state_dict.pop(
-            key_init + "mlp.router.classifier.weight"
-        ),
-    }
-    router_module.load_state_dict(torch_router_layer)
-    export_torchscript_model(
-        router_module,
-        args.model_repo,
-        "%s_%s_router_%d" % (args.model_tag, layer_type, layer_idx),
-        get_router_triton_config(),
-    )
-
-
-@ignore_except()
-def load_lm_head(model_state_dict):
-    if "xxl" in args.model_name:
-        torch_lm_layer = {
-            "lm_head.weight": model_state_dict.pop("decoder.lm_head.weight"),
-        }
-    else:
-        torch_lm_layer = {
-            "lm_head.weight": model_state_dict.pop("lm_head.weight"),
-        }
-    lm_module = SwitchLMPredictionHead(config)
-    lm_module.load_state_dict(torch_lm_layer)
-    export_torchscript_model(
-        lm_module,
-        args.model_repo,
-        "%s_lm_head" % args.model_tag,
-        get_lm_head_triton_config(),
-    )
 
 
 def load_partition(partition):
@@ -261,32 +244,63 @@ def load_partition(partition):
     print("Loading model from %s" % p_path, flush=True)
     print("Model keys: %s" % keys, flush=True)
 
-    for i in range(config.num_layers):
-        load_embed(model_state_dict, "encoder")
-        load_embed(model_state_dict, "decoder")
+    # for i in range(config.num_layers):
+    #     # load_embed(model_state_dict, "encoder")
+    #     # load_embed(model_state_dict, "decoder")
 
-        # load_block(model_state_dict, "encoder", i)
-        # load_block(model_state_dict, "decoder", i)
+    #     # load_block(model_state_dict, "encoder", i)
+    #     # load_block(model_state_dict, "decoder", i)
 
-        if i % 2 == 1:
-            load_router(model_state_dict, "encoder", i)
-            load_router(model_state_dict, "decoder", i)
-            # load_experts(model_state_dict, "encoder", i)
-            # load_experts(model_state_dict, "decoder", i)
-        # else:
-        #     load_mlp(model_state_dict, "encoder", i)
-        #     load_mlp(model_state_dict, "decoder", i)
+    #     if i % 2 == 1:
+    #         load_router(model_state_dict, "encoder", i)
+    #         load_router(model_state_dict, "decoder", i)
+    #         # load_experts(model_state_dict, "encoder", i)
+    #         # load_experts(model_state_dict, "decoder", i)
+    #     # else:
+    #     #     load_mlp(model_state_dict, "encoder", i)
+    #     #     load_mlp(model_state_dict, "decoder", i)
 
     load_final_layer(model_state_dict, "encoder")
     load_final_layer(model_state_dict, "decoder")
-    load_lm_head(model_state_dict)
+    # load_lm_head(model_state_dict)
 
     # return model_state_dict
     return {}
 
 
-pool = mp.Pool(processes=5)
-model_states = pool.map(load_partition, partitions.items())
+# pool = mp.Pool(processes=5)
+# model_states = pool.map(load_partition, partitions.items())
+
+for partition in partitions.items():
+    load_partition(partition)
+
+
+def load_embed(layer_type):
+    embed_tokens = weight_map["shared.weight"]
+    relative_attention_bias = weight_map[
+        f"{layer_type}.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+    ]
+
+    files = set([embed_tokens, relative_attention_bias])
+    load_partitions(files)
+
+    state_dict = {
+        "embed_tokens.weight": loaded_partitions[embed_tokens]["shared.weight"],
+        "relative_attention_bias.weight": loaded_partitions[relative_attention_bias][
+            f"{layer_type}.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+        ],
+    }
+    embed_cls = (
+        EncoderTokenEmbeddings if layer_type == "encoder" else DecoderTokenEmbeddings
+    )
+    embed = embed_cls(encoder_config if layer_type == "encoder" else decoder_config)
+    embed.load_state_dict(state_dict)
+    export_torchscript_model(
+        embed,
+        args.model_repo,
+        "%s_%s_embed" % (args.model_tag, layer_type),
+        getattr(ckpt_config, f"get_t5x_{layer_type}_embed_triton_config")(),
+    )
 
 
 def load_experts(layer_type, layer_idx):
@@ -295,11 +309,11 @@ def load_experts(layer_type, layer_idx):
     key_init = key_init + padding_str
 
     expert_cls = (
-        SwitchTransformersDenseGatedActDense
-        if "xxl" in args.model_name
-        else SwitchTransformersDenseActDense
+        SwitchDenseGatedActDense if "xxl" in args.model_name else SwitchDenseActDense
     )
-    expert_module = expert_cls(config)
+    expert_module = expert_cls(
+        encoder_config if layer_type == "encoder" else decoder_config
+    )
     print("Loading number experts %d" % config.num_experts, flush=True)
     for j in range(config.num_experts):
         expert_key = key_init + "mlp.experts.expert_%d." % j
@@ -316,9 +330,7 @@ def load_experts(layer_type, layer_idx):
             wo = weight_map[expert_key + "wo.weight"]
             files = set([wi, wo])
 
-        for f in files:
-            if f not in loaded_partitions:
-                loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+        load_partitions(files)
 
         print(files, loaded_partitions.keys(), flush=True)
 
@@ -378,17 +390,17 @@ def load_block(layer_type, layer_idx):
             weight_map[self_attention_key_o]
         ].pop(self_attention_key_o),
     }
-    if layer_idx == 0:
-        relative_attention_key = (
-            key_init + "layer.0.SelfAttention.relative_attention_bias.weight"
-        )
-        file = weight_map[relative_attention_key]
-        if file not in loaded_partitions:
-            loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
+    # if layer_idx == 0:
+    #     relative_attention_key = (
+    #         key_init + "layer.0.SelfAttention.relative_attention_bias.weight"
+    #     )
+    #     file = weight_map[relative_attention_key]
+    #     if file not in loaded_partitions:
+    #         loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
 
-        torch_attention_layer[
-            "attention.SelfAttention.relative_attention_bias.weight"
-        ] = loaded_partitions[file].pop(relative_attention_key)
+    #     torch_attention_layer[
+    #         "attention.SelfAttention.relative_attention_bias.weight"
+    #     ] = loaded_partitions[file].pop(relative_attention_key)
 
     if layer_type == "decoder":
         cross_attention_key = key_init + "layer.1."
@@ -453,7 +465,10 @@ def load_block(layer_type, layer_idx):
     block_module_cls = (
         SwitchEncoderBlock if layer_type == "encoder" else SwitchDecoderBlock
     )
-    block_module = block_module_cls(config, bool(layer_idx == 0))
+    block_module = block_module_cls(
+        encoder_config if layer_type == "encoder" else decoder_config,
+        bool(layer_idx == 0),
+    )
     block_module.load_state_dict(torch_attention_layer)
 
     export_torchscript_model(
@@ -464,16 +479,62 @@ def load_block(layer_type, layer_idx):
     )
 
 
-# for partition in partitions.items():
-#     p_file, p_path = partition
-#     model_state_dict = torch.load(p_path, map_location="cpu")
-#     print(p_file, model_state_dict.keys())
-#     # load_partition(partition)
+def load_router(layer_type, layer_idx):
+    key_init = get_key_init(layer_type, layer_idx)
+    padding_str = "layer.1." if layer_type == "encoder" else "layer.2."
+    key_init = key_init + padding_str
 
-for i in range(config.num_layers):
+    router_module = SwitchRouter(
+        encoder_config if layer_type == "encoder" else decoder_config
+    )
+
+    classifier = key_init + "mlp.router.classifier.weight"
+    layer_norm = key_init + "layer_norm.weight"
+    files = set([weight_map[classifier], weight_map[layer_norm]])
+
+    load_partitions(files)
+
+    torch_router_layer = {
+        "classifier.weight": loaded_partitions[weight_map[classifier]].pop(classifier),
+        "layer_norm.weight": loaded_partitions[weight_map[layer_norm]].pop(layer_norm),
+    }
+    router_module.load_state_dict(torch_router_layer)
+    export_torchscript_model(
+        router_module,
+        args.model_repo,
+        "%s_%s_router_%d" % (args.model_tag, layer_type, layer_idx),
+        get_router_triton_config(),
+    )
+
+def load_lm_head():
+    lm_head = "decoder.lm_head.weight" if "xxl" in args.model_name else "lm_head.weight"
+    files = set([weight_map[lm_head]])
+    for f in files:
+        if f not in loaded_partitions:
+            print("loading", f, partitions[f], flush=True)
+            loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+    torch_lm_layer = {
+        "lm_head.weight": loaded_partitions[files.pop()].pop(lm_head),
+    }
+    lm_module = SwitchLMPredictionHead(decoder_config)
+    lm_module.load_state_dict(torch_lm_layer)
+    export_torchscript_model(
+        lm_module,
+        args.model_repo,
+        "%s_lm_head" % args.model_tag,
+        get_lm_head_triton_config(),
+    )
+
+load_embed("encoder")
+load_embed("decoder")
+load_lm_head()
+
+for i in range(encoder_config.num_layers):
     load_block("encoder", i)
     load_block("decoder", i)
     if i % 2 == 1:
+        load_router("encoder", i)
+        load_router("decoder", i)
         load_experts("encoder", i)
         load_experts("decoder", i)
     else:
@@ -481,192 +542,3 @@ for i in range(config.num_layers):
         load_mlp("decoder", i)
 
     gc.collect()
-
-# for i in range(config.num_layers):
-#     key_init = "encoder.block.%d." % i
-#     print(key_init)
-#     torch_attention_layer = {
-#         key.replace(key_init + "layer.0", "attention"): model_state_dict.pop(key)
-#         for key in keys
-#         if key.startswith(key_init)
-#         and not "mlp" in key
-#         and not "layer.1.layer_norm" in key
-#     }
-#     encoder_block_module = SwitchEncoderBlock(config, bool(i == 0))
-#     encoder_block_module.load_state_dict(torch_attention_layer)
-#     export_torchscript_model(
-#         encoder_block_module,
-#         args.model_repo,
-#         "%s_encoder_block_%d" % (args.model_tag, i),
-#         get_t5x_encoder_block_triton_config(),
-#     )
-
-#     key_init = "decoder.block.%d." % i
-#     torch_attention_layer = {
-#         key.replace(key_init + "layer.0.", ""): model_state_dict.pop(key)
-#         for key in keys
-#         if key.startswith(key_init)
-#         and "layer.0" in key
-#         and not "mlp" in key
-#         and not "layer.2.layer_norm" in key
-#     }
-
-#     decoder_block_module = SwitchDecoderBlock(config, bool(i == 0))
-#     decoder_block_module.attention.load_state_dict(torch_attention_layer)
-
-#     torch_attention_layer = {
-#         key.replace(key_init + "layer.1.", ""): model_state_dict.pop(key)
-#         for key in keys
-#         if key.startswith(key_init)
-#         and "layer.1" in key
-#         and not "mlp" in key
-#         and not "layer.2.layer_norm" in key
-#     }
-#     decoder_block_module.cross_attention.load_state_dict(torch_attention_layer)
-#     export_torchscript_model(
-#         decoder_block_module,
-#         args.model_repo,
-#         "%s_decoder_block_%d" % (args.model_tag, i),
-#         get_t5x_decoder_block_triton_config(),
-#     )
-
-#     if i % 2 == 1:
-#         key_init = "encoder.block.%d." % i
-#         router_module = SwitchRouter(config)
-#         torch_router_layer = {
-#             key.replace(key_init + "layer.1.mlp.router.", ""): model_state_dict.pop(key)
-#             for key in keys
-#             if key.startswith(key_init)
-#             and "layer.1" in key
-#             and not "expert" in key
-#             and not "layer_norm" in key
-#         }
-#         router_module.load_state_dict(torch_router_layer)
-#         export_torchscript_model(
-#             router_module,
-#             args.model_repo,
-#             "%s_encoder_router_%d" % (args.model_tag, i),
-#             get_router_triton_config(),
-#         )
-
-#         key_init = "decoder.block.%d." % i
-#         router_module = SwitchRouter(config)
-#         torch_router_layer = {
-#             key.replace(key_init + "layer.2.mlp.router.", ""): model_state_dict.pop(key)
-#             for key in keys
-#             if key.startswith(key_init)
-#             and "layer.2" in key
-#             and not "expert" in key
-#             and not "layer_norm" in key
-#         }
-#         router_module.load_state_dict(torch_router_layer)
-#         export_torchscript_model(
-#             router_module,
-#             args.model_repo,
-#             "%s_decoder_router_%d" % (args.model_tag, i),
-#             get_router_triton_config(),
-#         )
-
-#         expert_module = SwitchTransformersDenseActDense(config)
-#         for j in range(config.num_experts):
-#             key_init = "encoder.block.%d." % i
-#             # decoder.block.11.layer.2.mlp.experts.expert_0.wo.weight
-#             torch_expert_layers = {
-#                 key.replace(
-#                     key_init + f"layer.1.mlp.experts.expert_{j}.", ""
-#                 ): model_state_dict.pop(key)
-#                 for key in keys
-#                 if key.startswith(key_init)
-#                 and "layer.1" in key
-#                 and f"expert_{j}" in key
-#             }
-#             expert_module.load_state_dict(torch_expert_layers)
-#             export_torchscript_model(
-#                 expert_module,
-#                 args.model_repo,
-#                 "%s_encoder_expert_%d_%d" % (args.model_tag, i, j),
-#                 get_expert_triton_config(),
-#             )
-
-#             key_init = "decoder.block.%d." % i
-#             torch_expert_layers = {
-#                 key.replace(
-#                     key_init + f"layer.2.mlp.experts.expert_{j}.", ""
-#                 ): model_state_dict.pop(key)
-#                 for key in keys
-#                 if key.startswith(key_init)
-#                 and "layer.2" in key
-#                 and f"expert_{j}" in key
-#             }
-#             expert_module.load_state_dict(torch_expert_layers)
-#             export_torchscript_model(
-#                 expert_module,
-#                 args.model_repo,
-#                 "%s_decoder_expert_%d_%d" % (args.model_tag, i, j),
-#                 get_expert_triton_config(),
-#             )
-#     else:
-#         key_init = "encoder.block.%d." % i
-#         ff_module = SwitchLayerFF(config)
-#         torch_mlp_layer = {
-#             key.replace(key_init + f"layer.1.", ""): model_state_dict.pop(key)
-#             for key in keys
-#             if key.startswith(key_init) and "layer.1" in key
-#         }
-#         ff_module.load_state_dict(torch_mlp_layer)
-#         export_torchscript_model(
-#             ff_module,
-#             args.model_repo,
-#             "%s_encoder_ff_%d" % (args.model_tag, i),
-#             get_ff_triton_config(),
-#         )
-
-#         key_init = "decoder.block.%d." % i
-#         ff_module = SwitchLayerFF(config)
-#         torch_mlp_layer = {
-#             key.replace(key_init + f"layer.2.", ""): model_state_dict.pop(key)
-#             for key in keys
-#             if key.startswith(key_init) and "layer.2" in key
-#         }
-#         ff_module.load_state_dict(torch_mlp_layer)
-#         export_torchscript_model(
-#             ff_module,
-#             args.model_repo,
-#             "%s_decoder_ff_%d" % (args.model_tag, i),
-#             get_ff_triton_config(),
-#         )
-
-# final_module = SwitchFinalLayerNorm(config)
-# torch_final_layer = {
-#     "layer_norm.weight": model_state_dict.pop("encoder.final_layer_norm.weight"),
-# }
-# final_module.load_state_dict(torch_final_layer)
-# export_torchscript_model(
-#     final_module,
-#     args.model_repo,
-#     "%s_encoder_final" % args.model_tag,
-#     get_ff_triton_config(),
-# )
-
-# torch_final_layer = {
-#     "layer_norm.weight": model_state_dict.pop("decoder.final_layer_norm.weight"),
-# }
-# final_module.load_state_dict(torch_final_layer)
-# export_torchscript_model(
-#     final_module,
-#     args.model_repo,
-#     "%s_decoder_final" % args.model_tag,
-#     get_ff_triton_config(),
-# )
-
-# torch_lm_layer = {
-#     "lm_head.weight": model_state_dict.pop("lm_head.weight"),
-# }
-# lm_module = SwitchLMPredictionHead(config)
-# lm_module.load_state_dict(torch_lm_layer)
-# export_torchscript_model(
-#     lm_module,
-#     args.model_repo,
-#     "%s_lm_head" % args.model_tag,
-#     get_lm_head_triton_config(),
-# )

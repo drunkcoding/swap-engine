@@ -25,6 +25,10 @@ def generate_expert_layers(i, num_experts, layer: str):
                 value: "%s"
             }
             output_map {
+                key: "forwarded_states"
+                value: "%s"
+            }
+            output_map {
                 key: "routes"
                 value: "%s"
             }
@@ -39,45 +43,21 @@ def generate_expert_layers(i, num_experts, layer: str):
             layer,
             i,
             "%s_hidden_states_block_%d" % (layer, i),
+            "%s_forwarded_states_block_%d" % (layer, i),
             "%s_routes_%d" % (layer, i),
             "%s_route_prob_max_%d" % (layer, i),
         )
     )
-    # for k in range(config.num_experts):
-    #     layer_cofig.append(
-    #         """
-    #         {
-    #             model_name: "%s_%s_expert_%d_%d"
-    #             input_map {
-    #                 key: "hidden_states"
-    #                 value: "%s"
-    #             }
-    #             input_map {
-    #                 key: "routes"
-    #                 value: "%s"
-    #             }
-    #             output_map {
-    #                 key: "hidden_states"
-    #                 value: "%s"
-    #             }
-    #         }
-    #         """
-    #         % (
-    #             args.model_name,
-    #             layer,
-    #             i,
-    #             k,
-    #             "%s_hidden_states_block_%d" % (layer, i),
-    #             "%s_routes_%d" % (layer, i),
-    #             "%s_expert_%d_%d" % (layer, i, k),
-    #         )
-    #     )
     layer_cofig.append(
         """
         {
             model_name: "%s_%s_preagg_%d"
             input_map {
                 key: "hidden_states"
+                value: "%s"
+            }
+            input_map {
+                key: "forwarded_states"
                 value: "%s"
             }
             input_map {
@@ -98,19 +78,8 @@ def generate_expert_layers(i, num_experts, layer: str):
             args.model_name,
             layer,
             i,
-            # "".join(
-            #     [
-            #         """
-            #         input_map {
-            #             key: "expert_output_%d"
-            #             value: "%s"
-            #         }
-            #         """
-            #         % (k, "%s_expert_%d_%d" % (layer, i, k))
-            #         for k in range(config.num_experts)
-            #     ]
-            # ),
             "%s_hidden_states_block_%d" % (layer, i),
+            "%s_forwarded_states_block_%d" % (layer, i),
             # "%s_hidden_states_agg_%d" % (layer, i),
             "%s_routes_%d" % (layer, i),
             "%s_route_prob_max_%d" % (layer, i),
@@ -185,7 +154,7 @@ def generate_lm_head():
                 value: "%s"
             }
             output_map {
-                key: "hidden_states"
+                key: "logits"
                 value: "%s"
             }
         } 
@@ -216,10 +185,6 @@ ensemble_steps.append(
             value: "%s"
         }
         output_map {
-            key: "extended_encoder_attention_mask"
-            value: "%s"
-        }
-        output_map {
             key: "encoder_position_bias"
             value: "%s"
         }
@@ -230,8 +195,7 @@ ensemble_steps.append(
         "encoder_input_ids",
         "encoder_attention_mask",
         "encoder_hidden_states_0",
-        "extended_encoder_attention_mask",
-        "encoder_position_bias_0",
+        "encoder_position_bias",
     )
 )
 
@@ -248,16 +212,8 @@ for i in range(config.num_layers):
             key: "encoder_position_bias"
             value: "%s"
         }
-        input_map {
-            key: "encoder_extended_attention_mask"
-            value: "%s"
-        }
         output_map {
             key: "encoder_hidden_states"
-            value: "%s"
-        }
-        output_map {
-            key: "encoder_position_bias"
             value: "%s"
         }
     }
@@ -266,10 +222,8 @@ for i in range(config.num_layers):
             args.model_name,
             i,
             "encoder_hidden_states_%d" % i,
-            "encoder_position_bias_%d" % i,
-            "extended_encoder_attention_mask",
+            "encoder_position_bias",
             "encoder_hidden_states_block_%d" % i,
-            "encoder_position_bias_%d" % (i + 1),
         )
     )
 
@@ -307,15 +261,11 @@ ensemble_steps.append(
                 value: "%s"
             }
             output_map {
-                key: "encoder_extended_attention_mask"
-                value: "%s"
-            }
-            output_map {
-                key: "extended_decoder_attention_mask"
-                value: "%s"
-            }
-            output_map {
                 key: "decoder_position_bias"
+                value: "%s"
+            }
+            output_map {
+                key: "encoder_decoder_position_bias"
                 value: "%s"
             }
         }
@@ -326,9 +276,8 @@ ensemble_steps.append(
         "decoder_attention_mask",
         "encoder_attention_mask",
         "decoder_hidden_states_0",
-        "encoder_extended_attention_mask",
-        "extended_decoder_attention_mask",
-        "decoder_position_bias_0",
+        "decoder_position_bias",
+        "encoder_decoder_position_bias",
     )
 )
 
@@ -353,24 +302,8 @@ for i in range(config.num_layers):
                     key: "encoder_decoder_position_bias"
                     value: "%s"
                 }
-                input_map {
-                    key: "encoder_extended_attention_mask"
-                    value: "%s"
-                }
-                input_map {
-                    key: "decoder_extended_attention_mask"
-                    value: "%s"
-                }
                 output_map {
                     key: "decoder_hidden_states"
-                    value: "%s"
-                }
-                output_map {
-                    key: "decoder_position_bias"
-                    value: "%s"
-                }
-                output_map {
-                    key: "encoder_decoder_position_bias"
                     value: "%s"
                 }
             }
@@ -380,13 +313,9 @@ for i in range(config.num_layers):
             i,
             "decoder_hidden_states_%d" % i,
             "encoder_hidden_states",
-            "decoder_position_bias_%d" % i,
-            "encoder_position_bias_%d" % (config.num_layers + i),
-            "encoder_extended_attention_mask",
-            "extended_decoder_attention_mask",
+            "decoder_position_bias",
+            "encoder_decoder_position_bias",
             "decoder_hidden_states_block_%d" % i,
-            "decoder_position_bias_%d" % (i + 1),
-            "encoder_position_bias_%d" % (config.num_layers + i + 1),
         )
     )
 
@@ -431,16 +360,6 @@ output [
     name: "logits"
     data_type: TYPE_FP32
     dims: [ -1, -1, -1 ]
-    },
-    {
-    name: "encoder_position_bias_%d"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
-    },
-    {
-    name: "decoder_position_bias_%d"
-    data_type: TYPE_FP32
-    dims: [ -1, -1, -1, -1 ]
     }
 ]
 ensemble_scheduling {
@@ -450,8 +369,6 @@ ensemble_scheduling {
 }
 """ % (
     args.model_name,
-    config.num_layers * 2,
-    config.num_layers,
     ",\n".join(ensemble_steps),
 )
 
