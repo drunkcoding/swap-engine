@@ -145,13 +145,32 @@ def query_server():
         # print(batch)
         input_ids = np.asarray(batch["input_ids"]).astype(np.int32)
         attention_mask = np.asarray(batch["attention_mask"]).astype(np.int32)
+
+        # if args.batch_size == 1:
+        #     non_zeros = attention_mask > 0
+        #     input_ids = input_ids[non_zeros]
+        #     attention_mask = attention_mask[non_zeros]
+
+        #     input_ids = np.expand_dims(input_ids, axis=0)
+        #     attention_mask = np.expand_dims(attention_mask, axis=0)
+
+        decoder_length = 3
+        idx = np.random.choice(np.arange(20), decoder_length, replace=False)
+        idx = np.sort(idx)
+        decoder_input_ids = input_ids.copy()
+        decoder_input_ids = decoder_input_ids[:, : 32]
+        decoder_input_ids[:, idx] = np.array([x for x in range(decoder_length)]) + 32000
+        # insert 0 at begining of decoder input ids
+        decoder_input_ids = np.insert(decoder_input_ids, 0, 0, axis=1)
+        decoder_attention_mask = np.ones_like(decoder_input_ids).astype(np.int32)
+
         triton_inputs = [
             format_triton_input(input_ids, "encoder_input_ids"),
             format_triton_input(attention_mask, "encoder_attention_mask"),
             # format_triton_input(np.zeros((input_ids.shape[0], 1)).astype(np.int32), "decoder_input_ids"),
             # format_triton_input(np.ones((input_ids.shape[0], 1)).astype(np.int32), "decoder_attention_mask"),
-            format_triton_input(np.random.randint(0, 30000, (input_ids.shape[0], np.sum(attention_mask))).astype(np.int32), "decoder_input_ids"),
-            format_triton_input(np.ones((input_ids.shape[0], np.sum(attention_mask))).astype(np.int32), "decoder_attention_mask"),
+            format_triton_input(decoder_input_ids, "decoder_input_ids"),
+            format_triton_input(decoder_attention_mask, "decoder_attention_mask"),
         ]
         triton_outputs = [format_triton_output("logits")]
 
