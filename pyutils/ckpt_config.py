@@ -26,7 +26,21 @@ def export_torchscript_model(model, model_repo, model_name, config):
 CONFIG_PLATFORM = """platform: "pytorch_libtorch" """
 
 
-def get_t5x_encoder_embed_triton_config():
+def get_instance_group(gid):
+    return """
+instance_group [
+    {
+    kind: KIND_GPU
+    count: 1
+    gpus: [ %d ]
+    }
+]
+""" % (
+        gid
+    )
+
+
+def get_t5x_encoder_embed_triton_config(gid=0):
     CONFIG_ENCODER_EMBEDDING = """
 %s
 input [
@@ -53,14 +67,16 @@ output [
     dims: [ -1, -1, -1, -1 ]
     }
 ]
+%s
 """ % (
         CONFIG_PLATFORM,
+        get_instance_group(gid),
     )
 
     return CONFIG_ENCODER_EMBEDDING
 
 
-def get_t5x_decoder_embed_triton_config():
+def get_t5x_decoder_embed_triton_config(gid=0):
     CONFIG_DECODER_EMBEDDING = """
 platform: "pytorch_libtorch"
 input [
@@ -96,13 +112,16 @@ output [
     data_type: TYPE_FP32
     dims: [ -1, -1, -1, -1 ]
     }
-]   
-"""
+]
+%s   
+""" % (
+        get_instance_group(gid),
+    )
 
     return CONFIG_DECODER_EMBEDDING
 
 
-def get_expert_triton_config():
+def get_expert_triton_config(gid=0):
     CONFIG_EXPERT = """
 platform: "pytorch_libtorch"
 input [
@@ -119,12 +138,15 @@ output [
     dims: [ -1, -1 ]
     }
 ]
-"""
+%s
+""" % (
+        get_instance_group(gid),
+    )
 
     return CONFIG_EXPERT
 
 
-def get_router_triton_config():
+def get_router_triton_config(gid=0):
     CONFIG_ROUTER = """
 platform: "pytorch_libtorch"
 input [
@@ -151,11 +173,15 @@ output [
     dims: [ -1 , -1, -1 ]
     }
 ]
-    """
+%s
+""" % (
+        get_instance_group(gid),
+    )
 
     return CONFIG_ROUTER
 
-def get_lm_head_triton_config():
+
+def get_lm_head_triton_config(gid=0):
     CONFIG_LM_HEAD = """
 platform: "pytorch_libtorch"
 input [
@@ -172,12 +198,16 @@ output [
     dims: [ -1, -1, -1 ]
     }
 ]
-"""
+%s
+""" % (
+        get_instance_group(gid),
+    )
 
     return CONFIG_LM_HEAD
 
+
 # for both ff and  layer norm
-def get_ff_triton_config():
+def get_ff_triton_config(gid=0):
     CONFIG_FORWARD = """
 platform: "pytorch_libtorch"
 input [
@@ -194,11 +224,14 @@ output [
     dims: [ -1, -1, -1 ]
     }
 ]
-"""
+%s
+""" % (
+        get_instance_group(gid),
+    )
     return CONFIG_FORWARD
 
 
-def get_t5x_encoder_block_triton_config():
+def get_t5x_encoder_block_triton_config(gid=0):
     CONFIG_ENCODER_BLOCK = """
 platform: "pytorch_libtorch"
 input [
@@ -220,12 +253,15 @@ output [
     dims: [ -1, -1, -1 ]
     }
 ]
-"""
+%s
+""" % (
+        get_instance_group(gid),
+    )
 
     return CONFIG_ENCODER_BLOCK
 
 
-def get_t5x_decoder_block_triton_config():
+def get_t5x_decoder_block_triton_config(gid=0):
     CONFIG_DECODER_BLOCK = """
 platform: "pytorch_libtorch"
 input [
@@ -257,6 +293,9 @@ output [
     dims: [ -1, -1, -1 ]
     }
 ]
-"""
+%s
+""" % (
+        get_instance_group(gid),
+    )
 
     return CONFIG_DECODER_BLOCK

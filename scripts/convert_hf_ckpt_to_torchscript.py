@@ -20,65 +20,79 @@ from pysrc.transformer.switch.modeling_switch_transformers import *
 class ModelArguments:
     model_name: str = field(metadata={"help": "Name of the model from HuggingFace"})
     model_path: str = field(metadata={"help": "Path to model cache directory."})
+    num_gpu: int = field(default=1, metadata={"help": "Number of GPUs to use."})
+    cfg_only: bool = field(default=False, metadata={"help": "Only export config."})
 
     def __post_init__(self):
         self.model_tag = self.model_name.split("/")[1]
         self.model_repo = "_".join(["model_repo", self.model_tag])
         "%s_encoder_embed" % self.model_tag,
 
+        self.gpu_ids = [i for i in range(self.num_gpu)]
+
 
 parser = HfArgumentParser((ModelArguments,))
 args = parser.parse_args_into_dataclasses()[0]
+
+g_index = 0
+
+
+def get_gid():
+    global g_index
+    g_index += 1
+    return args.gpu_ids[g_index % len(args.gpu_ids)]
 
 
 def get_cache_partition(key):
     return hf_hub_download(args.model_name, filename=key, cache_dir=args.model_path)
 
 
-try:
-    # test if is a large checkpoint split into multiple files
-    index_path = get_cache_partition("pytorch_model.bin.index.json")
-    # load json file index_path
-    with open(index_path) as f:
-        weight_map = json.load(f)["weight_map"]
+if not args.cfg_only:
 
-    # create a reverse mapping from file name to weight name list
-    file_to_weights = {}
-    for weight_name, file_name in weight_map.items():
-        if file_name not in file_to_weights:
-            file_to_weights[file_name] = []
-        file_to_weights[file_name].append(weight_name)
+    try:
+        # test if is a large checkpoint split into multiple files
+        index_path = get_cache_partition("pytorch_model.bin.index.json")
+        # load json file index_path
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
 
-    pool = mp.Pool(processes=mp.cpu_count())
-    partitions = pool.map(get_cache_partition, file_to_weights.keys())
-    partitions = dict(zip(file_to_weights.keys(), partitions))
-    pool.close()
-    pool.join()
-except:
-    # test if is a single file
-    index_path = get_cache_partition("pytorch_model.bin")
-    partitions = [index_path]
-    partitions = dict(zip(["pytorch_model.bin"], partitions))
+        # create a reverse mapping from file name to weight name list
+        file_to_weights = {}
+        for weight_name, file_name in weight_map.items():
+            if file_name not in file_to_weights:
+                file_to_weights[file_name] = []
+            file_to_weights[file_name].append(weight_name)
 
-    model = SwitchTransformersForConditionalGeneration.from_pretrained(
-        args.model_name, cache_dir=args.model_path
-    )
-    model = model.state_dict()
+        pool = mp.Pool(processes=mp.cpu_count())
+        partitions = pool.map(get_cache_partition, file_to_weights.keys())
+        partitions = dict(zip(file_to_weights.keys(), partitions))
+        pool.close()
+        pool.join()
+    except:
+        # test if is a single file
+        index_path = get_cache_partition("pytorch_model.bin")
+        partitions = [index_path]
+        partitions = dict(zip(["pytorch_model.bin"], partitions))
 
-    weight_map = {}
-    for key in list(model.keys()):
-        weight_map[key] = "pytorch_model.bin"
+        model = SwitchTransformersForConditionalGeneration.from_pretrained(
+            args.model_name, cache_dir=args.model_path
+        )
+        model = model.state_dict()
 
-    file_to_weights = {}
-    for weight_name, file_name in weight_map.items():
-        if file_name not in file_to_weights:
-            file_to_weights[file_name] = []
-        file_to_weights[file_name].append(weight_name)
+        weight_map = {}
+        for key in list(model.keys()):
+            weight_map[key] = "pytorch_model.bin"
 
-    del model
-    gc.collect()
+        file_to_weights = {}
+        for weight_name, file_name in weight_map.items():
+            if file_name not in file_to_weights:
+                file_to_weights[file_name] = []
+            file_to_weights[file_name].append(weight_name)
 
-print("Model partitions: ", partitions.keys(), flush=True)
+        del model
+        gc.collect()
+
+    print("Model partitions: ", partitions.keys(), flush=True)
 
 config = SwitchTransformersConfig.from_pretrained(
     args.model_name, cache_dir=args.model_path
@@ -93,13 +107,6 @@ decoder_config = copy.deepcopy(config)
 decoder_config.is_decoder = True
 decoder_config.is_encoder_decoder = False
 decoder_config.num_layers = config.num_decoder_layers
-
-# model = SwitchTransformersForConditionalGeneration.from_pretrained(
-#     args.model_name, cache_dir=args.model_path, low_memory_mode=True
-# )
-# model.eval()
-# model_state_dict = model.state_dict()
-# keys = list(model_state_dict.keys())
 
 
 def get_key_init(layer_type, layer_idx):
@@ -140,11 +147,13 @@ def load_missing_keys(keys):
 
 loaded_partitions = {}
 
+
 def load_partition(f):
     global loaded_partitions
     if f in loaded_partitions:
         return loaded_partitions[f]
     loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+
 
 def load_partitions(files):
     global loaded_partitions
@@ -153,10 +162,19 @@ def load_partitions(files):
             continue
         loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
 
+
 def load_mlp(layer_type, layer_idx):
     key_init = get_key_init(layer_type, layer_idx)
     padding_str = "layer.1." if layer_type == "encoder" else "layer.2."
     key_init = key_init + padding_str
+
+    if args.cfg_only:
+        save_triton_config(
+            get_ff_triton_config(get_gid()),
+            args.model_repo,
+            "%s_%s_ff_%d" % (args.model_tag, layer_type, layer_idx),
+        )
+        return
 
     if "xxl" in args.model_name:
         wi_0 = weight_map[key_init + "mlp.wi_0.weight"]
@@ -210,72 +228,53 @@ def load_mlp(layer_type, layer_idx):
         mlp_module,
         args.model_repo,
         "%s_%s_ff_%d" % (args.model_tag, layer_type, layer_idx),
-        get_ff_triton_config(),
+        get_ff_triton_config(get_gid()),
     )
 
 
-@ignore_except()
-def load_final_layer(model_state_dict, layer_type):
+# @ignore_except()
+def load_final_layer(layer_type):
+
+    if args.cfg_only:
+        save_triton_config(
+            get_ff_triton_config(get_gid()),
+            args.model_repo,
+            "%s_%s_final" % (args.model_tag, layer_type),
+        )
+        return
+
     final_layer = SwitchFinalLayerNorm(
         encoder_config if layer_type == "encoder" else decoder_config
     )
+
+    final_layer_norm = "%s.final_layer_norm.weight" % layer_type
+    files = set([weight_map[final_layer_norm]])
+    load_partitions(files)
+
     torch_final_layer = {
-        "layer_norm.weight": model_state_dict.pop(
-            "%s.final_layer_norm.weight" % layer_type
-        ),
+        "layer_norm.weight": loaded_partitions[final_layer_norm].pop(final_layer_norm)
     }
     final_layer.load_state_dict(torch_final_layer)
     export_torchscript_model(
         final_layer,
         args.model_repo,
         "%s_%s_final" % (args.model_tag, layer_type),
-        get_ff_triton_config(),
+        get_ff_triton_config(get_gid()),
     )
 
 
-
-
-
-def load_partition(partition):
-    p_file, p_path = partition
-    model_state_dict = torch.load(p_path, map_location="cpu")
-    keys = list(model_state_dict.keys())
-
-    print("Loading model from %s" % p_path, flush=True)
-    print("Model keys: %s" % keys, flush=True)
-
-    # for i in range(config.num_layers):
-    #     # load_embed(model_state_dict, "encoder")
-    #     # load_embed(model_state_dict, "decoder")
-
-    #     # load_block(model_state_dict, "encoder", i)
-    #     # load_block(model_state_dict, "decoder", i)
-
-    #     if i % 2 == 1:
-    #         load_router(model_state_dict, "encoder", i)
-    #         load_router(model_state_dict, "decoder", i)
-    #         # load_experts(model_state_dict, "encoder", i)
-    #         # load_experts(model_state_dict, "decoder", i)
-    #     # else:
-    #     #     load_mlp(model_state_dict, "encoder", i)
-    #     #     load_mlp(model_state_dict, "decoder", i)
-
-    load_final_layer(model_state_dict, "encoder")
-    load_final_layer(model_state_dict, "decoder")
-    # load_lm_head(model_state_dict)
-
-    # return model_state_dict
-    return {}
-
-
-# pool = mp.Pool(processes=5)
-# model_states = pool.map(load_partition, partitions.items())
-
-for partition in partitions.items():
-    load_partition(partition)
-
-
 def load_embed(layer_type):
+
+    if args.cfg_only:
+        save_triton_config(
+            getattr(ckpt_config, f"get_t5x_{layer_type}_embed_triton_config")(
+                get_gid()
+            ),
+            args.model_repo,
+            "%s_%s_embed" % (args.model_tag, layer_type),
+        )
+        return
+
     embed_tokens = weight_map["shared.weight"]
     relative_attention_bias = weight_map[
         f"{layer_type}.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
@@ -299,7 +298,7 @@ def load_embed(layer_type):
         embed,
         args.model_repo,
         "%s_%s_embed" % (args.model_tag, layer_type),
-        getattr(ckpt_config, f"get_t5x_{layer_type}_embed_triton_config")(),
+        getattr(ckpt_config, f"get_t5x_{layer_type}_embed_triton_config")(get_gid()),
     )
 
 
@@ -307,6 +306,15 @@ def load_experts(layer_type, layer_idx):
     key_init = get_key_init(layer_type, layer_idx)
     padding_str = "layer.1." if layer_type == "encoder" else "layer.2."
     key_init = key_init + padding_str
+
+    if args.cfg_only:
+        for j in range(config.num_experts):
+            save_triton_config(
+                get_expert_triton_config(get_gid()),
+                args.model_repo,
+                "%s_%s_expert_%d_%d" % (args.model_tag, layer_type, layer_idx, j),
+            )
+        return
 
     expert_cls = (
         SwitchDenseGatedActDense if "xxl" in args.model_name else SwitchDenseActDense
@@ -351,13 +359,21 @@ def load_experts(layer_type, layer_idx):
             expert_module,
             args.model_repo,
             "%s_%s_expert_%d_%d" % (args.model_tag, layer_type, layer_idx, j),
-            get_expert_triton_config(),
+            get_expert_triton_config(get_gid()),
         )
 
 
 def load_block(layer_type, layer_idx):
     key_init = get_key_init(layer_type, layer_idx)
     self_attention_key = key_init + "layer.0."
+
+    if args.cfg_only:
+        save_triton_config(
+            getattr(ckpt_config, f"get_t5x_{layer_type}_block_triton_config")(get_gid()),
+            args.model_repo,
+            "%s_%s_block_%d" % (args.model_tag, layer_type, layer_idx),
+        )
+        return
 
     self_attention_key_k = self_attention_key + "SelfAttention.k.weight"
     self_attention_key_v = self_attention_key + "SelfAttention.v.weight"
@@ -475,7 +491,7 @@ def load_block(layer_type, layer_idx):
         block_module,
         args.model_repo,
         "%s_%s_block_%d" % (args.model_tag, layer_type, layer_idx),
-        getattr(ckpt_config, f"get_t5x_{layer_type}_block_triton_config")(),
+        getattr(ckpt_config, f"get_t5x_{layer_type}_block_triton_config")(get_gid()),
     )
 
 
@@ -483,6 +499,14 @@ def load_router(layer_type, layer_idx):
     key_init = get_key_init(layer_type, layer_idx)
     padding_str = "layer.1." if layer_type == "encoder" else "layer.2."
     key_init = key_init + padding_str
+
+    if args.cfg_only:
+        save_triton_config(
+            get_router_triton_config(get_gid()),
+            args.model_repo,
+            "%s_%s_router_%d" % (args.model_tag, layer_type, layer_idx),
+        )
+        return
 
     router_module = SwitchRouter(
         encoder_config if layer_type == "encoder" else decoder_config
@@ -503,10 +527,20 @@ def load_router(layer_type, layer_idx):
         router_module,
         args.model_repo,
         "%s_%s_router_%d" % (args.model_tag, layer_type, layer_idx),
-        get_router_triton_config(),
+        get_router_triton_config(get_gid()),
     )
 
+
 def load_lm_head():
+
+    if args.cfg_only:
+        save_triton_config(
+            get_lm_head_triton_config(get_gid()),
+            args.model_repo,
+            "%s_lm_head" % args.model_tag,
+        )
+        return
+
     lm_head = "decoder.lm_head.weight" if "xxl" in args.model_name else "lm_head.weight"
     files = set([weight_map[lm_head]])
     for f in files:
@@ -522,23 +556,32 @@ def load_lm_head():
         lm_module,
         args.model_repo,
         "%s_lm_head" % args.model_tag,
-        get_lm_head_triton_config(),
+        get_lm_head_triton_config(get_gid()),
     )
+
 
 load_embed("encoder")
 load_embed("decoder")
 load_lm_head()
+load_final_layer("encoder")
+load_final_layer("decoder")
 
-for i in range(encoder_config.num_layers):
+for i in range(encoder_config.num_sparse_encoder_layers * 2):
     load_block("encoder", i)
-    load_block("decoder", i)
     if i % 2 == 1:
         load_router("encoder", i)
-        load_router("decoder", i)
         load_experts("encoder", i)
-        load_experts("decoder", i)
     else:
         load_mlp("encoder", i)
+
+    gc.collect()
+
+for i in range(decoder_config.num_sparse_decoder_layers * 2):
+    load_block("decoder", i)
+    if i % 2 == 1:
+        load_router("decoder", i)
+        load_experts("decoder", i)
+    else:
         load_mlp("decoder", i)
 
     gc.collect()
