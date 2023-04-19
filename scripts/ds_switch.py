@@ -4,7 +4,7 @@ import os
 
 sys.path.append(os.getcwd())
 
-from pysrc.transformer.switch.modeling_switch_ds import SwitchModelDeepSpeed, SwitchModelDeepSpeedPipe
+from pysrc.transformer.switch.modeling_switch_ds_pipe import SwitchModelDeepSpeed, SwitchModelDeepSpeedPipe
 from pysrc.transformer.switch.configuration_switch import SwitchConfig
 import torch
 import os

@@ -1,0 +1,26 @@
+{
+    "zero_optimization": {
+        "stage": 3,
+        "offload_optimizer": {
+            "device": "nvme",
+            "nvme_path": "/mnt/raid0nvme1/xly/.cache/switch-base-8",
+            "pin_memory": true
+        },
+        "offload_param": {
+            "device": "nvme",
+            "nvme_path": "/mnt/raid0nvme1/xly/.cache/switch-base-8",
+            "buffer_size": 1e9,
+            "buffer_count": 16,
+            "pin_memory": true
+        },
+        "contiguous_gradients": true,
+        "reduce_bucket_size": 1e7,
+        "stage3_prefetch_bucket_size": 1e9, 
+        "stage3_param_persistence_threshold": 0,
+        "sub_group_size": 1e6,
+        "allgather_bucket_size": 1e6,
+        "stage3_max_live_parameters": 0,
+        "stage3_max_reuse_distance": 0,
+        "stage3_gather_16bit_weights_on_model_save": true
+    }
+}

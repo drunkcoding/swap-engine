@@ -299,3 +299,103 @@ output [
     )
 
     return CONFIG_DECODER_BLOCK
+
+
+def get_t5x_encoder_sparseblock_triton_config(gid=0):
+    CONFIG_ENCODER_BLOCK = """
+platform: "pytorch_libtorch"
+input [
+    {
+    name: "encoder_hidden_states"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1 ]
+    },
+    {
+    name: "encoder_position_bias"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1, -1 ]
+    }
+]
+output [
+    {
+    name: "encoder_hidden_states"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1 ]
+    },
+    {
+    name: "forwarded_states"
+    data_type: TYPE_FP32
+    dims: [ -1 , -1, -1 ]
+    },
+    {
+    name: "routes"
+    data_type: TYPE_INT64
+    dims: [ -1 , -1, -1 ]
+    },
+    {
+    name: "route_prob_max"
+    data_type: TYPE_FP32
+    dims: [ -1 , -1, -1 ]
+    }
+]
+%s
+""" % (
+        get_instance_group(gid),
+    )
+
+    return CONFIG_ENCODER_BLOCK
+
+
+def get_t5x_decoder_sparseblock_triton_config(gid=0):
+    CONFIG_DECODER_BLOCK = """
+platform: "pytorch_libtorch"
+input [
+    {
+    name: "decoder_hidden_states"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1 ]
+    },
+    {
+    name: "encoder_hidden_states"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1 ]
+    },
+    {
+    name: "decoder_position_bias"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1, -1 ]
+    },
+    {
+    name: "encoder_decoder_position_bias"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1, -1 ]
+    }
+]
+output [
+    {
+    name: "decoder_hidden_states"
+    data_type: TYPE_FP32
+    dims: [ -1, -1, -1 ]
+    },
+    {
+    name: "forwarded_states"
+    data_type: TYPE_FP32
+    dims: [ -1 , -1, -1 ]
+    },
+    {
+    name: "routes"
+    data_type: TYPE_INT64
+    dims: [ -1 , -1, -1 ]
+    },
+    {
+    name: "route_prob_max"
+    data_type: TYPE_FP32
+    dims: [ -1 , -1, -1 ]
+    }
+]
+%s
+""" % (
+        get_instance_group(gid),
+    )
+
+    return CONFIG_DECODER_BLOCK

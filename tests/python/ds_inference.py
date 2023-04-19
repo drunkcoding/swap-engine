@@ -1,6 +1,8 @@
 import asyncio
 from dataclasses import dataclass, field
 from email import parser
+import gc
+import json
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -10,19 +12,42 @@ from transformers import (
     AutoModelForSeq2SeqLM,
     HfArgumentParser,
     SwitchTransformersForConditionalGeneration,
-    T5ForConditionalGeneration,
+    AutoTokenizer,
     Trainer,
+)
+from transformers.models.switch_transformers.modeling_switch_transformers import (
+    SwitchTransformersDenseActDense,
 )
 from transformers import T5Tokenizer, default_data_collator
 import datasets
 import deepspeed
 from transformers.deepspeed import deepspeed_init
-
+from deepspeed.moe.layer import MoE
+from dataloader import *
+from huggingface_hub import hf_hub_download
+import multiprocessing as mp
 
 # mute all warnings
 import warnings
 
 warnings.filterwarnings("ignore")
+
+
+def get_cache_partition(key):
+    path = hf_hub_download(
+        f"google/{args.model_name}", filename=key, cache_dir=args.model_path
+    )
+    gc.collect()
+    return path
+
+
+class DummyModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fake_param = torch.nn.Parameter(torch.tensor(0.0))
+
+    def forward(self, *args, **kwargs):
+        return None
 
 
 @dataclass
@@ -47,54 +72,11 @@ class ModelArguments:
 
 
 parser = HfArgumentParser((ModelArguments,))
-args = parser.parse_args_into_dataclasses()[0]
-
+args = parser.parse_args_into_dataclasses(return_remaining_strings=True)[0]
+print(args)
 # torch.set_printoptions(profile="full")
 
-if args.dataset == "glue" and "mnli" in args.task:
-    sentence1_key, sentence2_key = "premise", "hypothesis"
-elif args.dataset == "glue" and args.task == "rte":
-    sentence1_key, sentence2_key = "sentence1", "sentence2"
-elif args.dataset == "glue" and args.task == "sst2":
-    sentence1_key, sentence2_key = "sentence", None
-elif args.dataset == "glue" and args.task == "cola":
-    sentence1_key, sentence2_key = "sentence", None
-elif args.dataset == "glue" and args.task == "mrpc":
-    sentence1_key, sentence2_key = "sentence1", "sentence2"
-elif args.dataset == "glue" and args.task == "qqp":
-    sentence1_key, sentence2_key = "question1", "question2"
-elif args.dataset == "glue" and args.task == "qnli":
-    sentence1_key, sentence2_key = "question", "sentence"
-elif args.dataset == "glue" and args.task == "stsb":
-    sentence1_key, sentence2_key = "sentence1", "sentence2"
-elif args.dataset == "glue" and args.task == "wnli":
-    sentence1_key, sentence2_key = "sentence1", "sentence2"
-elif args.dataset == "super_glue" and args.task == "boolq":
-    sentence1_key, sentence2_key = "question", "passage"
-elif args.dataset == "super_glue" and args.task == "cb":
-    sentence1_key, sentence2_key = "premise", "hypothesis"
-elif args.dataset == "super_glue" and args.task == "copa":
-    sentence1_key, sentence2_key = "premise", "choice1"
-elif args.dataset == "super_glue" and args.task == "multirc":
-    sentence1_key, sentence2_key = "paragraph", "question"
-elif args.dataset == "super_glue" and args.task == "record":
-    sentence1_key, sentence2_key = "passage", "question"
-elif args.dataset == "super_glue" and args.task == "rte":
-    sentence1_key, sentence2_key = "sentence1", "sentence2"
-elif args.dataset == "super_glue" and args.task == "wic":
-    sentence1_key, sentence2_key = "sentence1", "sentence2"
-elif args.dataset == "super_glue" and args.task == "wsc":
-    sentence1_key, sentence2_key = "text", "target"
-elif args.dataset == "super_glue" and args.task == "wsc.fixed":
-    sentence1_key, sentence2_key = "text", "target"
-elif args.dataset == "super_glue" and args.task == "axg":
-    sentence1_key, sentence2_key = "premise", "hypothesis"
-elif args.dataset == "super_glue" and args.task == "axb":
-    sentence1_key, sentence2_key = "premise", "hypothesis"
-elif args.dataset == "squad":
-    sentence1_key, sentence2_key = "context", "question"
-else:
-    raise ValueError(f"Unknown dataset/task combination: {args.dataset}/{args.task}")
+sentence1_key, sentence2_key = sentence_keys(args.dataset, args.task)
 
 
 def preprocess_function(examples):
@@ -113,7 +95,9 @@ raw_datasets = datasets.load_dataset(args.dataset, args.task)
 
 print(raw_datasets)
 
-tokenizer = T5Tokenizer.from_pretrained("t5-small")
+tokenizer = AutoTokenizer.from_pretrained(
+    f"google/{args.model_name}", cache_dir=args.model_path
+)
 
 processed_datasets = raw_datasets.map(
     preprocess_function,
@@ -139,10 +123,32 @@ config = AutoConfig.from_pretrained(
     f"google/{args.model_name}", cache_dir=args.model_path
 )
 
-model_origin = AutoModelForSeq2SeqLM.from_pretrained(
-    f"google/{args.model_name}", config=config, cache_dir=args.model_path
+# # test if is a large checkpoint split into multiple files
+# index_path = get_cache_partition("pytorch_model.bin.index.json")
+# # load json file index_path
+# with open(index_path) as f:
+#     weight_map = json.load(f)["weight_map"]
+
+# # create a reverse mapping from file name to weight name list
+# file_to_weights = {}
+# for weight_name, file_name in weight_map.items():
+#     if file_name not in file_to_weights:
+#         file_to_weights[file_name] = []
+#     file_to_weights[file_name].append(weight_name)
+
+# # get unique file names
+# file_names = list(set(file_to_weights.keys()))
+# print("Model files: ", file_names, flush=True)
+
+
+# print("Model partitions: ", partitions.keys(), flush=True)
+# exit()
+model = AutoModelForSeq2SeqLM.from_pretrained(
+    f"google/{args.model_name}",
+    config=config,
+    cache_dir=args.model_path,
 )
-state_dict = model_origin.state_dict()
+state_dict = model.state_dict()
 
 
 def load(module: torch.nn.Module, prefix=""):
@@ -161,18 +167,63 @@ def load(module: torch.nn.Module, prefix=""):
             load(child, prefix + name + ".")
 
 
-with deepspeed.zero.Init(config_dict_or_path=args.deepspeed_config):
+with deepspeed.zero.Init(
+    config_dict_or_path=args.deepspeed_config,
+):
     model = SwitchTransformersForConditionalGeneration(config)
     model.eval()
 
-load(model, "")
+load(model)
+# del state_dict
 
-del model_origin
-del state_dict
+# for partition in tqdm(file_names):
+#     print(f"Loading partition {partition}...")
+#     path = get_cache_partition(partition)
+#     state_dict = torch.load(path, map_location="cpu")
+#     load(model, state_dict)
+#     del state_dict
+#     gc.collect()
+#     torch.cuda.empty_cache()
 
-print("SwitchTransformersForConditionalGeneration Model Loaded")
+# print("SwitchTransformersForConditionalGeneration Model Loaded")
+# dummy = DummyModule()
+# optimizer = torch.optim.Adam(dummy.parameters(), lr=0.0001 )
+# lr_scheduler = torch.optim.lr_scheduler.LambdaLR(
+#     optimizer, lambda x: min(1.0, (x + 1) / 100)
+# )
+# params_group = [
+#     {
+#         "params": [p for n, p in dummy.named_parameters()],
+#         "lr": 0.0001,
+#     }
+# ]
+model_parameters = [next(model.parameters())]
 
-deepspeed_engine, _, _, _ = deepspeed.initialize(args=args, model=model)
+# with open(args.deepspeed_config, "r") as f:
+#     zero_config = json.load(f)
+# zero_config = zero_config["zero_optimization"]
+
+# deepspeed_engine = deepspeed.init_inference(
+#     model=model,
+#     config={
+#         "dtype": torch.float32,
+#         "tensor_parallel": {
+#             "enabled": True,
+#             "tp_size": 1,
+#         },
+#         "quant": {
+#             "enabled": False,
+#         },
+#         "zero": {
+#             "stage": 3,
+#         }
+#     },
+# )
+deepspeed_engine, _, _, _ = deepspeed.initialize(
+    args=args,
+    model=model,
+    model_parameters=model_parameters,
+)
 model = deepspeed_engine.module
 model.eval()
 
@@ -208,5 +259,5 @@ with torch.no_grad():
             decoder_attention_mask=torch.Tensor(decoder_attention_mask)
             .long()
             .to("cuda"),
-        ) 
+        )
         del outputs

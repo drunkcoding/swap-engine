@@ -3,51 +3,55 @@ import os
 from typing import Union
 from transformers import SwitchTransformersConfig, HfArgumentParser
 
+
 @dataclass
 class ModelArguments:
     model_name: str = field(metadata={"help": "Name of the model from HuggingFace"})
+
     def __post_init__(self):
         self.model_repo = "_".join(["model_repo", self.model_name])
+
 
 parser = HfArgumentParser((ModelArguments,))
 args = parser.parse_args_into_dataclasses()[0]
 
 config = SwitchTransformersConfig.from_pretrained(f"google/{args.model_name}")
 
+
 def generate_expert_layers(i, num_experts, layer: str):
     layer_cofig = []
-    layer_cofig.append(
-        """
-        {
-            model_name: "%s_%s_router_%d"
-            input_map {
-                key: "hidden_states"
-                value: "%s"
-            }
-            output_map {
-                key: "forwarded_states"
-                value: "%s"
-            }
-            output_map {
-                key: "routes"
-                value: "%s"
-            }
-            output_map {
-                key: "route_prob_max"
-                value: "%s"
-            }
-        } 
-        """
-        % (
-            args.model_name,
-            layer,
-            i,
-            "%s_hidden_states_block_%d" % (layer, i),
-            "%s_forwarded_states_block_%d" % (layer, i),
-            "%s_routes_%d" % (layer, i),
-            "%s_route_prob_max_%d" % (layer, i),
-        )
-    )
+    # layer_cofig.append(
+    #     """
+    #     {
+    #         model_name: "%s_%s_router_%d"
+    #         input_map {
+    #             key: "hidden_states"
+    #             value: "%s"
+    #         }
+    #         output_map {
+    #             key: "forwarded_states"
+    #             value: "%s"
+    #         }
+    #         output_map {
+    #             key: "routes"
+    #             value: "%s"
+    #         }
+    #         output_map {
+    #             key: "route_prob_max"
+    #             value: "%s"
+    #         }
+    #     } 
+    #     """
+    #     % (
+    #         args.model_name,
+    #         layer,
+    #         i,
+    #         "%s_hidden_states_block_%d" % (layer, i),
+    #         "%s_forwarded_states_block_%d" % (layer, i),
+    #         "%s_routes_%d" % (layer, i),
+    #         "%s_route_prob_max_%d" % (layer, i),
+    #     )
+    # )
     layer_cofig.append(
         """
         {
@@ -86,7 +90,6 @@ def generate_expert_layers(i, num_experts, layer: str):
             "%s_hidden_states_%d" % (layer, i + 1),
         )
     )
-
 
     return layer_cofig
 
@@ -137,11 +140,18 @@ def generate_final_layer(layer: str):
         % (
             args.model_name,
             layer,
-            "%s_hidden_states_%d" % (layer, config.num_layers),
+            "%s_hidden_states_%d"
+            % (
+                layer,
+                config.num_sparse_decoder_layers * 2
+                if layer == "decoder"
+                else config.num_sparse_encoder_layers * 2,
+            ),
             "%s_hidden_states" % layer,
         )
     )
     return layer_cofig
+
 
 def generate_lm_head():
     layer_cofig = []
@@ -166,6 +176,7 @@ def generate_lm_head():
         )
     )
     return layer_cofig
+
 
 ensemble_steps = []
 ensemble_steps.append(
@@ -199,24 +210,37 @@ ensemble_steps.append(
     )
 )
 
-for i in range(config.num_layers):
-    ensemble_steps.append(
-        """
-    {
-        model_name: "%s_encoder_block_%d"
-        input_map {
-            key: "encoder_hidden_states"
-            value: "%s"
-        }
-        input_map {
-            key: "encoder_position_bias"
-            value: "%s"
-        }
-        output_map {
-            key: "encoder_hidden_states"
-            value: "%s"
-        }
+for i in range(config.num_sparse_encoder_layers * 2):
+    if i % 2 == 1:
+        ensemble_steps.append(
+"""
+{
+    model_name: "%s_encoder_block_%d"
+    input_map {
+        key: "encoder_hidden_states"
+        value: "%s"
     }
+    input_map {
+        key: "encoder_position_bias"
+        value: "%s"
+    }
+    output_map {
+        key: "encoder_hidden_states"
+        value: "%s"
+    }
+    output_map {
+        key: "forwarded_states"
+        value: "%s"
+    }
+    output_map {
+        key: "routes"
+        value: "%s"
+    }
+    output_map {
+        key: "route_prob_max"
+        value: "%s"
+    }
+}
 """
         % (
             args.model_name,
@@ -224,14 +248,39 @@ for i in range(config.num_layers):
             "encoder_hidden_states_%d" % i,
             "encoder_position_bias",
             "encoder_hidden_states_block_%d" % i,
+            "encoder_forwarded_states_block_%d" % i,
+            "encoder_routes_%d" % i,
+            "encoder_route_prob_max_%d" % i,
         )
     )
-
-    if i % 2 == 1:
         ensemble_steps += generate_expert_layers(i, config.num_experts, "encoder")
     else:
-        ensemble_steps += generate_ff_layer(i, "encoder")
-
+        ensemble_steps.append(
+"""
+{
+    model_name: "%s_encoder_block_%d"
+    input_map {
+        key: "encoder_hidden_states"
+        value: "%s"
+    }
+    input_map {
+        key: "encoder_position_bias"
+        value: "%s"
+    }
+    output_map {
+        key: "encoder_hidden_states"
+        value: "%s"
+    }
+}
+"""
+        % (
+            args.model_name,
+            i,
+            "encoder_hidden_states_%d" % i,
+            "encoder_position_bias",
+            "encoder_hidden_states_%d" % (i+1),
+        )
+    )
 
 ensemble_steps += generate_final_layer("encoder")
 
@@ -281,8 +330,64 @@ ensemble_steps.append(
     )
 )
 
-for i in range(config.num_layers):
-    ensemble_steps.append(
+for i in range(config.num_sparse_decoder_layers * 2):
+    
+
+    if i % 2 == 1:
+        ensemble_steps.append(
+            """
+                {
+                    model_name: "%s_decoder_block_%d"
+                    input_map {
+                        key: "decoder_hidden_states"
+                        value: "%s"
+                    }
+                    input_map {
+                        key: "encoder_hidden_states"
+                        value: "%s"
+                    }
+                    input_map {
+                        key: "decoder_position_bias"
+                        value: "%s"
+                    }
+                    input_map {
+                        key: "encoder_decoder_position_bias"
+                        value: "%s"
+                    }
+                    output_map {
+                        key: "decoder_hidden_states"
+                        value: "%s"
+                    }
+                    output_map {
+                        key: "forwarded_states"
+                        value: "%s"
+                    }
+                    output_map {
+                        key: "routes"
+                        value: "%s"
+                    }
+                    output_map {
+                        key: "route_prob_max"
+                        value: "%s"
+                    }
+                }
+            """
+            % (
+                args.model_name,
+                i,
+                "decoder_hidden_states_%d" % i,
+                "encoder_hidden_states",
+                "decoder_position_bias",
+                "encoder_decoder_position_bias",
+                "decoder_hidden_states_block_%d" % i,
+                "decoder_forwarded_states_block_%d" % i,
+                "decoder_routes_%d" % i,
+                "decoder_route_prob_max_%d" % i,
+            )
+        )
+        ensemble_steps += generate_expert_layers(i, config.num_experts, "decoder")
+    else:
+        ensemble_steps.append(
         """
             {
                 model_name: "%s_decoder_block_%d"
@@ -315,14 +420,9 @@ for i in range(config.num_layers):
             "encoder_hidden_states",
             "decoder_position_bias",
             "encoder_decoder_position_bias",
-            "decoder_hidden_states_block_%d" % i,
+            "decoder_hidden_states_%d" % (i+1),
         )
     )
-
-    if i % 2 == 1:
-        ensemble_steps += generate_expert_layers(i, config.num_experts, "decoder")
-    else:
-        ensemble_steps += generate_ff_layer(i, "decoder")
 
 
 ensemble_steps += generate_final_layer("decoder")
@@ -371,6 +471,7 @@ ensemble_scheduling {
     args.model_name,
     ",\n".join(ensemble_steps),
 )
+
 
 def make_dir_if_not_exists(path):
     if not os.path.exists(path):

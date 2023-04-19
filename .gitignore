@@ -2,7 +2,15 @@ build
 docker/*backend*
 profile
 flaxformer/
+torch-extensions/
 outputs/
+runs/
+*.npy
+*.nsys-rep
+*.pdf
+*.csv
+*.gnuplot
+*.pt
 # Prerequisites
 *.d
 

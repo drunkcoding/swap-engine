@@ -18,6 +18,14 @@ from tritonclient import utils
 import tritonclient.utils.cuda_shared_memory as cudashm
 import tritonclient.utils.shared_memory as shm
 
+# mute all warnings
+import warnings
+import transformers
+
+transformers.logging.set_verbosity_error()
+warnings.filterwarnings("ignore")
+
+
 @dataclass
 class ModelArguments:
     model_name: str = field(metadata={"help": "Name of the model from HuggingFace"})
@@ -34,12 +42,13 @@ class ModelArguments:
         else:
             self.split = "test"
 
+
 parser = HfArgumentParser((ModelArguments,))
 args = parser.parse_args_into_dataclasses()[0]
 
 torch.set_printoptions(profile="full")
 
-if  args.dataset == "glue" and "mnli" in args.task:
+if args.dataset == "glue" and "mnli" in args.task:
     sentence1_key, sentence2_key = "premise", "hypothesis"
 elif args.dataset == "glue" and args.task == "rte":
     sentence1_key, sentence2_key = "sentence1", "sentence2"
@@ -84,6 +93,7 @@ elif args.dataset == "squad":
 else:
     raise ValueError(f"Unknown dataset/task combination: {args.dataset}/{args.task}")
 
+
 def format_triton_input(input: np.ndarray, name: str):
     triton_input = grpcclient.InferInput(
         name,
@@ -112,12 +122,13 @@ def preprocess_function(examples):
 
     return result
 
+
+print(args.dataset, args.task)
 raw_datasets = datasets.load_dataset(args.dataset, args.task)
 
 print(raw_datasets)
 
 tokenizer = T5Tokenizer.from_pretrained("t5-small")
-
 
 
 processed_datasets = raw_datasets.map(
@@ -130,13 +141,18 @@ processed_datasets = raw_datasets.map(
 train_dataset = processed_datasets[args.split]
 print(train_dataset)
 
-URL = "localhost:8001"
+URL = "localhost:60051"
+
 
 def query_server():
     triton_client = grpcclient.InferenceServerClient(url=URL, verbose=False)
 
     dataloader = torch.utils.data.DataLoader(
-        train_dataset, collate_fn=default_data_collator, batch_size=args.batch_size, shuffle=True, drop_last=True
+        train_dataset,
+        collate_fn=default_data_collator,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=True,
     )
 
     count = 0
@@ -158,7 +174,7 @@ def query_server():
         idx = np.random.choice(np.arange(20), decoder_length, replace=False)
         idx = np.sort(idx)
         decoder_input_ids = input_ids.copy()
-        decoder_input_ids = decoder_input_ids[:, : 32]
+        decoder_input_ids = decoder_input_ids[:, :32]
         decoder_input_ids[:, idx] = np.array([x for x in range(decoder_length)]) + 32000
         # insert 0 at begining of decoder input ids
         decoder_input_ids = np.insert(decoder_input_ids, 0, 0, axis=1)

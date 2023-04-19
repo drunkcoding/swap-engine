@@ -2,18 +2,35 @@ from dataclasses import dataclass, field
 from transformers import SwitchTransformersConfig, HfArgumentParser
 import os
 
+
 def make_dir_if_not_exists(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
+
 @dataclass
 class ModelArguments:
     model_name: str = field(metadata={"help": "Name of the model from HuggingFace"})
+    num_gpu: int = field(default=1, metadata={"help": "Number of GPUs to use"})
+
     def __post_init__(self):
         self.model_repo = "_".join(["model_repo", self.model_name])
 
+        self.gpu_ids = [i for i in range(self.num_gpu)]
+
+
 parser = HfArgumentParser((ModelArguments,))
 args = parser.parse_args_into_dataclasses()[0]
+
+
+g_index = 0
+
+
+def get_gid():
+    global g_index
+    g_index += 1
+    return args.gpu_ids[g_index % len(args.gpu_ids)]
+
 
 def generate_preaggregate_config(num_experts, model_name, layer_name, layer_idx):
     code = """
@@ -24,75 +41,9 @@ import hashlib
 import tritonclient
 import tritonclient.grpc as grpcclient
 import tritonclient.http as httpclient
+from multiprocessing import shared_memory
 
 class TritonPythonModel:
-    @staticmethod
-    def auto_complete_config(auto_complete_model_config):
-        # (batch_size, sequence_length, num_expert)
-        inputs = [
-            {
-                'name': "hidden_states",
-                'data_type': 'TYPE_FP32',
-                'dims': [ -1, -1, -1 ],
-            },
-            {
-                'name': "forwarded_states",
-                'data_type': 'TYPE_FP32',
-                'dims': [ -1, -1, -1 ],
-            },
-            {
-                'name': "routes",
-                'data_type': 'TYPE_INT64',
-                'dims': [ -1 , -1, -1 ],
-            },
-            {
-                'name': "route_prob_max",
-                'data_type': 'TYPE_FP32',
-                'dims': [ -1 , -1, -1 ],
-            }
-        ]
-        outputs = [{
-            'name': 'hidden_states',
-            'data_type': 'TYPE_FP32',
-            'dims': [ -1, -1, -1 ]
-        }]
-
-        # Demonstrate the usage of `as_dict`, `add_input`, `add_output`,
-        # `set_max_batch_size`, and `set_dynamic_batching` functions.
-        # Store the model configuration as a dictionary.
-        config = auto_complete_model_config.as_dict()
-        input_names = []
-        output_names = []
-        for input in config['input']:
-            input_names.append(input['name'])
-        for output in config['output']:
-            output_names.append(output['name'])
-
-        for input in inputs:
-            # The name checking here is only for demonstrating the usage of
-            # `as_dict` function. `add_input` will check for conflicts and
-            # raise errors if an input with the same name already exists in
-            # the configuration but has different data_type or dims property.
-            if input['name'] not in input_names:
-                auto_complete_model_config.add_input(input)
-        for output in outputs:
-            # The name checking here is only for demonstrating the usage of
-            # `as_dict` function. `add_output` will check for conflicts and
-            # raise errors if an output with the same name already exists in
-            # the configuration but has different data_type or dims property.
-            if output['name'] not in output_names:
-                auto_complete_model_config.add_output(output)
-
-        auto_complete_model_config.set_max_batch_size(0)
-
-        # To enable a dynamic batcher with default settings, you can use
-        # auto_complete_model_config set_dynamic_batching() function. It is
-        # commented in this example because the max_batch_size is zero.
-        #
-        # auto_complete_model_config.set_dynamic_batching()
-
-        return auto_complete_model_config
-
     def initialize(self, args):
         print('Initialized...')
 
@@ -101,8 +52,8 @@ class TritonPythonModel:
         self.layer_name =  "%s"
         self.layer_idx = %d
 
-        self.client = httpclient.InferenceServerClient(
-            url="localhost:8000", verbose=False
+        self.client = grpcclient.InferenceServerClient(
+            url="localhost:50051", verbose=False
         )
 
         self.data_path = f"/opt/data/{self.backend_name}"
@@ -111,6 +62,13 @@ class TritonPythonModel:
             os.mkdir(self.data_path)
         except:
             pass
+
+        try:
+            self.shm = shared_memory.SharedMemory(name="expert_count", create=True, size=4)
+            # set the value of the shared memory to 0
+            buffer[:4] = bytearray([0, 0, 0, 0])
+        except:
+            self.shm = shared_memory.SharedMemory(name="expert_count")
     
     def dummy_callback(self, result, error):
         pass
@@ -134,11 +92,21 @@ class TritonPythonModel:
             route_prob_max = pb_utils.get_input_tensor_by_name(request, "route_prob_max").as_numpy()
             # print("route_prob_max", route_prob_max, flush=True)
             batch_size, seq_len, d_model = hidden_states.shape
+
+            activation_cnt = 0
+            for i in range(self.num_experts):
+                indexes_list = routes[:, :, i].astype(bool)
+                if np.any(indexes_list):
+                    activation_cnt += 1
+
+            # write the number of active experts to the shared memory 4 bytes uint32
+            self.shm.buf[:4] = activation_cnt.to_bytes(4, byteorder='little')
         
             expert_outputs = [None] * self.num_experts
             model_name = f"expert-{self.layer_name}-{self.layer_idx}"
             sequence_id = request.correlation_id()
             request_id = request.request_id()
+
             for i in range(self.num_experts):
                 indexes_list = routes[:, :, i].astype(bool)
                 if np.any(indexes_list):
@@ -153,16 +121,20 @@ class TritonPythonModel:
                         sequence_id=(sequence_id & 0xFFFFFFFF) | ((i+1) << 32),
                     )
 
-            for i in range(self.num_experts):
-                indexes_list = routes[:, :, i].astype(bool)
-                if np.any(indexes_list):
                     output = expert_outputs[i].as_numpy("hidden_states")
-                    indexes_list = routes[:, :, i].astype(bool)
                     forwarded_states[indexes_list] = output
+
+            # for i in range(self.num_experts):
+            #     indexes_list = routes[:, :, i].astype(bool)
+            #     if np.any(indexes_list):
+            #         output = expert_outputs[i].as_numpy("hidden_states")
+            #         indexes_list = routes[:, :, i].astype(bool)
+            #         forwarded_states[indexes_list] = output
 
             hidden_states = hidden_states + route_prob_max * forwarded_states
 
-            # print(hidden_states, flush=True)
+            activation_cnt = 0
+            self.shm.buf[:4] = activation_cnt.to_bytes(4, byteorder='little')
             
             out_tensor = pb_utils.Tensor("hidden_states", hidden_states)
             inference_response = pb_utils.InferenceResponse(output_tensors=[out_tensor])
@@ -175,7 +147,7 @@ class TritonPythonModel:
         return responses
 
     def prepare_input(self, name: str, input: np.ndarray):
-        triton_input = httpclient.InferInput(
+        triton_input = grpcclient.InferInput(
             name,
             input.shape,
             tritonclient.utils.np_to_triton_dtype(input.dtype),
@@ -184,7 +156,7 @@ class TritonPythonModel:
         return triton_input
 
     def prepare_output(self, name: str):
-        triton_output = httpclient.InferRequestedOutput(
+        triton_output = grpcclient.InferRequestedOutput(
             name,
         )
         return triton_output
@@ -204,6 +176,51 @@ class TritonPythonModel:
     make_dir_if_not_exists(os.path.join(model_path, "0"))
     with open(os.path.join(model_path, "0", "model.py"), "w") as f:
         f.write(code)
+
+        config = """
+name: "%s"
+backend: "python"
+input [
+    {
+        name: "hidden_states"
+        data_type: TYPE_FP32
+        dims: [-1, -1, -1]
+    },
+    {
+        name: "forwarded_states"
+        data_type: TYPE_FP32
+        dims: [-1, -1, -1]
+    },
+    {
+        name: "routes"
+        data_type: TYPE_INT64
+        dims: [-1, -1, -1]
+    },
+    {
+        name: "route_prob_max"
+        data_type: TYPE_FP32
+        dims: [-1, -1, -1]
+    }
+]
+output [
+    {
+        name: "hidden_states"
+        data_type: TYPE_FP32
+        dims: [-1, -1, -1]
+    }
+]
+instance_group [
+    {
+    kind: KIND_CPU
+    count: 1
+    }
+]
+    """ % (
+            model_name
+        )
+
+    with open(os.path.join(model_path, "config.pbtxt"), "w") as f:
+        f.write(config)
 
 
 config = SwitchTransformersConfig.from_pretrained(f"google/{args.model_name}")

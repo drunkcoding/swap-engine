@@ -1,0 +1,37 @@
+{
+    "optimizer": {
+        "type": "AdamW",
+        "params": {
+            "lr": 6e-4,
+            "weight_decay": 0.01
+        }
+    },
+    "zero_optimization": {
+        "stage": 3,
+        "offload_optimizer": {
+            "device": "cpu",
+            "pin_memory": true
+        },
+        "offload_param": {
+            "device": "nvme",
+            "nvme_path": "/mnt/data/xly/.cache/switch-xxl-128",
+            "buffer_size": 1e9,
+            "buffer_count": 32,
+            "pin_memory": true
+        },
+        "contiguous_gradients": true,
+        "reduce_bucket_size": 1e9,
+        "stage3_prefetch_bucket_size": 2e9, 
+        "stage3_param_persistence_threshold": 0,
+        "sub_group_size": 1e9,
+        "allgather_bucket_size": 1e9,
+        "stage3_max_live_parameters": 0,
+        "stage3_max_reuse_distance": 2e8,
+        "stage3_gather_16bit_weights_on_model_save": true
+    },
+    "gradient_accumulation_steps": 1,
+    "gradient_clipping": 0,
+    "steps_per_print": 2000,
+    "train_micro_batch_size_per_gpu": 1,
+    "wall_clock_breakdown": false
+}

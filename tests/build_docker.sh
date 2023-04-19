@@ -1,2 +1,2 @@
-docker build -t tritonserver_custom docker/.
+docker build -t tritonserver_custom:dev docker/.
 

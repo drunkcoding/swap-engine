@@ -232,7 +232,6 @@ def load_mlp(layer_type, layer_idx):
     )
 
 
-# @ignore_except()
 def load_final_layer(layer_type):
 
     if args.cfg_only:
@@ -252,7 +251,7 @@ def load_final_layer(layer_type):
     load_partitions(files)
 
     torch_final_layer = {
-        "layer_norm.weight": loaded_partitions[final_layer_norm].pop(final_layer_norm)
+        "layer_norm.weight": loaded_partitions[weight_map[final_layer_norm]].pop(final_layer_norm)
     }
     final_layer.load_state_dict(torch_final_layer)
     export_torchscript_model(
@@ -363,6 +362,306 @@ def load_experts(layer_type, layer_idx):
         )
 
 
+def load_dense_block(layer_type, layer_idx):
+    key_init = get_key_init(layer_type, layer_idx)
+    self_attention_key = key_init + "layer.0."
+    mlp_key = key_init + ("layer.1." if layer_type == "encoder" else "layer.2.")
+
+    if args.cfg_only:
+        save_triton_config(
+            getattr(ckpt_config, f"get_t5x_{layer_type}_block_triton_config")(get_gid()),
+            args.model_repo,
+            "%s_%s_block_%d" % (args.model_tag, layer_type, layer_idx),
+        )
+        return
+
+    self_attention_key_k = self_attention_key + "SelfAttention.k.weight"
+    self_attention_key_v = self_attention_key + "SelfAttention.v.weight"
+    self_attention_key_q = self_attention_key + "SelfAttention.q.weight"
+    self_attention_key_o = self_attention_key + "SelfAttention.o.weight"
+
+    files = set(
+        [
+            weight_map[self_attention_key_k],
+            weight_map[self_attention_key_v],
+            weight_map[self_attention_key_q],
+            weight_map[self_attention_key_o],
+        ]
+    )
+    for f in files:
+        if f not in loaded_partitions:
+            loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+
+    torch_attention_layer = {
+        "block.attention.SelfAttention.k.weight": loaded_partitions[
+            weight_map[self_attention_key_k]
+        ].pop(self_attention_key_k),
+        "block.attention.SelfAttention.v.weight": loaded_partitions[
+            weight_map[self_attention_key_v]
+        ].pop(self_attention_key_v),
+        "block.attention.SelfAttention.q.weight": loaded_partitions[
+            weight_map[self_attention_key_q]
+        ].pop(self_attention_key_q),
+        "block.attention.SelfAttention.o.weight": loaded_partitions[
+            weight_map[self_attention_key_o]
+        ].pop(self_attention_key_o),
+    }
+
+    if layer_type == "decoder":
+        cross_attention_key = key_init + "layer.1."
+
+        cross_attention_key_k = cross_attention_key + "EncDecAttention.k.weight"
+        cross_attention_key_v = cross_attention_key + "EncDecAttention.v.weight"
+        cross_attention_key_q = cross_attention_key + "EncDecAttention.q.weight"
+        cross_attention_key_o = cross_attention_key + "EncDecAttention.o.weight"
+
+        files = set(
+            [
+                weight_map[cross_attention_key_k],
+                weight_map[cross_attention_key_v],
+                weight_map[cross_attention_key_q],
+                weight_map[cross_attention_key_o],
+            ]
+        )
+
+        for f in files:
+            if f not in loaded_partitions:
+                loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.k.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_k]].pop(
+            cross_attention_key_k
+        )
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.v.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_v]].pop(
+            cross_attention_key_v
+        )
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.q.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_q]].pop(
+            cross_attention_key_q
+        )
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.o.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_o]].pop(
+            cross_attention_key_o
+        )
+
+        cross_attention_layer_norm_key = key_init + "layer.1.layer_norm.weight"
+        file = weight_map[cross_attention_layer_norm_key]
+        if file not in loaded_partitions:
+            loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
+
+        torch_attention_layer["block.cross_attention.layer_norm.weight"] = loaded_partitions[
+            weight_map[cross_attention_layer_norm_key]
+        ].pop(cross_attention_layer_norm_key)
+
+    attention_layer_norm_key = key_init + "layer.0.layer_norm.weight"
+    file = weight_map[attention_layer_norm_key]
+    if file not in loaded_partitions:
+        loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
+
+    torch_attention_layer["block.attention.layer_norm.weight"] = loaded_partitions[
+        weight_map[attention_layer_norm_key]
+    ].pop(attention_layer_norm_key)
+
+    if "xxl" in args.model_name:
+        wi_0 = weight_map[mlp_key + "mlp.wi_0.weight"]
+        wi_1 = weight_map[mlp_key + "mlp.wi_1.weight"]
+        wo = weight_map[mlp_key + "mlp.wo.weight"]
+        layer_norm = weight_map[mlp_key + "layer_norm.weight"]
+        files = set([wi_0, wi_1, wo, layer_norm])
+    else:
+        wi = weight_map[mlp_key + "mlp.wi.weight"]
+        wo = weight_map[mlp_key + "mlp.wo.weight"]
+        layer_norm = weight_map[mlp_key + "layer_norm.weight"]
+        files = set([wi, wo, layer_norm])
+
+    load_partitions(files)
+    print("loaded_partitions", loaded_partitions.keys(), flush=True)
+    print("key_init", mlp_key, "files", files, flush=True)
+
+    if "xxl" in args.model_name:
+        torch_mlp_layer = {
+            "mlp.mlp.wi_0.weight": loaded_partitions[wi_0].pop(
+                mlp_key + "mlp.wi_0.weight"
+            ),
+            "mlp.mlp.wi_1.weight": loaded_partitions[wi_1].pop(
+                mlp_key + "mlp.wi_1.weight"
+            ),
+            "mlp.mlp.wo.weight": loaded_partitions[wo].pop(mlp_key + "mlp.wo.weight"),
+            "mlp.layer_norm.weight": loaded_partitions[layer_norm].pop(
+                mlp_key + "layer_norm.weight"
+            ),
+        }
+    else:
+        torch_mlp_layer = {
+            "mlp.mlp.wi.weight": loaded_partitions[wi].pop(mlp_key + "mlp.wi.weight"),
+            "mlp.mlp.wo.weight": loaded_partitions[wo].pop(mlp_key + "mlp.wo.weight"),
+            "mlp.layer_norm.weight": loaded_partitions[layer_norm].pop(
+                mlp_key + "layer_norm.weight"
+            ),
+        }
+
+    torch_attention_layer = {**torch_attention_layer, **torch_mlp_layer}
+
+    block_module_cls = (
+        SwitchEncoderDenseBlock if layer_type == "encoder" else SwitchDecoderDenseBlock
+    )
+    block_module = block_module_cls(
+        encoder_config if layer_type == "encoder" else decoder_config,
+        bool(layer_idx == 0),
+        is_gated="xxl" in args.model_name,
+    )
+    block_module.load_state_dict(torch_attention_layer)
+
+    export_torchscript_model(
+        block_module,
+        args.model_repo,
+        "%s_%s_block_%d" % (args.model_tag, layer_type, layer_idx),
+        getattr(ckpt_config, f"get_t5x_{layer_type}_block_triton_config")(get_gid()),
+    )
+
+def load_sparse_block(layer_type, layer_idx):
+    key_init = get_key_init(layer_type, layer_idx)
+    self_attention_key = key_init + "layer.0."
+    mlp_key = key_init + ("layer.1." if layer_type == "encoder" else "layer.2.")
+
+    if args.cfg_only:
+        save_triton_config(
+            getattr(ckpt_config, f"get_t5x_{layer_type}_sparseblock_triton_config")(get_gid()),
+            args.model_repo,
+            "%s_%s_block_%d" % (args.model_tag, layer_type, layer_idx),
+        )
+        return
+
+    self_attention_key_k = self_attention_key + "SelfAttention.k.weight"
+    self_attention_key_v = self_attention_key + "SelfAttention.v.weight"
+    self_attention_key_q = self_attention_key + "SelfAttention.q.weight"
+    self_attention_key_o = self_attention_key + "SelfAttention.o.weight"
+
+    files = set(
+        [
+            weight_map[self_attention_key_k],
+            weight_map[self_attention_key_v],
+            weight_map[self_attention_key_q],
+            weight_map[self_attention_key_o],
+        ]
+    )
+    for f in files:
+        if f not in loaded_partitions:
+            loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+
+    torch_attention_layer = {
+        "block.attention.SelfAttention.k.weight": loaded_partitions[
+            weight_map[self_attention_key_k]
+        ].pop(self_attention_key_k),
+        "block.attention.SelfAttention.v.weight": loaded_partitions[
+            weight_map[self_attention_key_v]
+        ].pop(self_attention_key_v),
+        "block.attention.SelfAttention.q.weight": loaded_partitions[
+            weight_map[self_attention_key_q]
+        ].pop(self_attention_key_q),
+        "block.attention.SelfAttention.o.weight": loaded_partitions[
+            weight_map[self_attention_key_o]
+        ].pop(self_attention_key_o),
+    }
+
+    if layer_type == "decoder":
+        cross_attention_key = key_init + "layer.1."
+
+        cross_attention_key_k = cross_attention_key + "EncDecAttention.k.weight"
+        cross_attention_key_v = cross_attention_key + "EncDecAttention.v.weight"
+        cross_attention_key_q = cross_attention_key + "EncDecAttention.q.weight"
+        cross_attention_key_o = cross_attention_key + "EncDecAttention.o.weight"
+
+        files = set(
+            [
+                weight_map[cross_attention_key_k],
+                weight_map[cross_attention_key_v],
+                weight_map[cross_attention_key_q],
+                weight_map[cross_attention_key_o],
+            ]
+        )
+
+        for f in files:
+            if f not in loaded_partitions:
+                loaded_partitions[f] = torch.load(partitions[f], map_location="cpu")
+
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.k.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_k]].pop(
+            cross_attention_key_k
+        )
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.v.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_v]].pop(
+            cross_attention_key_v
+        )
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.q.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_q]].pop(
+            cross_attention_key_q
+        )
+        torch_attention_layer[
+            "block.cross_attention.EncDecAttention.o.weight"
+        ] = loaded_partitions[weight_map[cross_attention_key_o]].pop(
+            cross_attention_key_o
+        )
+
+        cross_attention_layer_norm_key = key_init + "layer.1.layer_norm.weight"
+        file = weight_map[cross_attention_layer_norm_key]
+        if file not in loaded_partitions:
+            loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
+
+        torch_attention_layer["block.cross_attention.layer_norm.weight"] = loaded_partitions[
+            weight_map[cross_attention_layer_norm_key]
+        ].pop(cross_attention_layer_norm_key)
+
+    attention_layer_norm_key = key_init + "layer.0.layer_norm.weight"
+    file = weight_map[attention_layer_norm_key]
+    if file not in loaded_partitions:
+        loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
+
+    torch_attention_layer["block.attention.layer_norm.weight"] = loaded_partitions[
+        weight_map[attention_layer_norm_key]
+    ].pop(attention_layer_norm_key)
+
+    print(weight_map)
+
+    classifier = mlp_key + "mlp.router.classifier.weight"
+    layer_norm = mlp_key + "layer_norm.weight"
+    files = set([weight_map[classifier], weight_map[layer_norm]])
+
+    load_partitions(files)
+
+    torch_router_layer = {
+        "router.classifier.weight": loaded_partitions[weight_map[classifier]].pop(classifier),
+        "router.layer_norm.weight": loaded_partitions[weight_map[layer_norm]].pop(layer_norm),
+    }
+
+    torch_attention_layer.update(torch_router_layer)
+
+
+    block_module_cls = (
+        SwitchEncoderSparseBlock if layer_type == "encoder" else SwitchDecoderSparseBlock
+    )
+    block_module = block_module_cls(
+        encoder_config if layer_type == "encoder" else decoder_config,
+        bool(layer_idx == 0),
+    )
+    block_module.load_state_dict(torch_attention_layer)
+
+    export_torchscript_model(
+        block_module,
+        args.model_repo,
+        "%s_%s_block_%d" % (args.model_tag, layer_type, layer_idx),
+        getattr(ckpt_config, f"get_t5x_{layer_type}_sparseblock_triton_config")(get_gid()),
+    )
+
+
 def load_block(layer_type, layer_idx):
     key_init = get_key_init(layer_type, layer_idx)
     self_attention_key = key_init + "layer.0."
@@ -406,17 +705,6 @@ def load_block(layer_type, layer_idx):
             weight_map[self_attention_key_o]
         ].pop(self_attention_key_o),
     }
-    # if layer_idx == 0:
-    #     relative_attention_key = (
-    #         key_init + "layer.0.SelfAttention.relative_attention_bias.weight"
-    #     )
-    #     file = weight_map[relative_attention_key]
-    #     if file not in loaded_partitions:
-    #         loaded_partitions[file] = torch.load(partitions[file], map_location="cpu")
-
-    #     torch_attention_layer[
-    #         "attention.SelfAttention.relative_attention_bias.weight"
-    #     ] = loaded_partitions[file].pop(relative_attention_key)
 
     if layer_type == "decoder":
         cross_attention_key = key_init + "layer.1."
@@ -567,21 +855,19 @@ load_final_layer("encoder")
 load_final_layer("decoder")
 
 for i in range(encoder_config.num_sparse_encoder_layers * 2):
-    load_block("encoder", i)
     if i % 2 == 1:
-        load_router("encoder", i)
+        load_sparse_block("encoder", i)
         load_experts("encoder", i)
     else:
-        load_mlp("encoder", i)
+        load_dense_block("encoder", i)
 
     gc.collect()
 
 for i in range(decoder_config.num_sparse_decoder_layers * 2):
-    load_block("decoder", i)
     if i % 2 == 1:
-        load_router("decoder", i)
+        load_sparse_block("decoder", i)
         load_experts("decoder", i)
     else:
-        load_mlp("decoder", i)
+        load_dense_block("decoder", i)
 
     gc.collect()

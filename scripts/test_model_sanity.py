@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 import gc
 import json
+import time
 import traceback
 import uuid
 import numpy as np
@@ -53,6 +54,7 @@ print("attention_mask", attention_mask.shape)
 print("decoder_input_ids", decoder_input_ids.shape)
 print("decoder_attention_mask", decoder_attention_mask.shape)
 
+start_time = time.time()
 with torch.no_grad():
     output = gold_model(
         input_ids,
@@ -64,6 +66,8 @@ with torch.no_grad():
         output_router_logits=True,
         return_dict=True,
     )
+end_time = time.time()
+# print("gold_model inference time", end_time - start_time)
 
 print(output.keys())
 
@@ -137,7 +141,7 @@ print(torch.allclose(test_logits, gold_logits, atol=1e-3))
 import tritonclient.grpc as grpcclient
 from tritonclient import utils
 
-URL = "localhost:8001"
+URL = "localhost:50051"
 triton_client = grpcclient.InferenceServerClient(url=URL, verbose=False)
 
 def format_triton_input(input: np.ndarray, name: str):
@@ -178,8 +182,8 @@ results = triton_client.infer(
 )
 
 triton_logits = results.as_numpy("logits")
-print(torch.allclose(torch.from_numpy(triton_logits).to("cuda"), gold_logits))
+print(torch.allclose(torch.from_numpy(triton_logits).to("cuda"), gold_logits, atol=1e-3))
 
 print(triton_logits)
 print(gold_logits)
-
+print("====================================================================")

@@ -56,7 +56,21 @@
         "thread": "cpp",
         "cinttypes": "cpp",
         "typeinfo": "cpp",
-        "__nullptr": "cpp"
+        "__nullptr": "cpp",
+        "compare": "cpp",
+        "concepts": "cpp",
+        "map": "cpp",
+        "numbers": "cpp",
+        "semaphore": "cpp",
+        "stop_token": "cpp",
+        "list": "cpp",
+        "unordered_set": "cpp",
+        "any": "cpp",
+        "set": "cpp",
+        "regex": "cpp",
+        "shared_mutex": "cpp",
+        "variant": "cpp",
+        "future": "cpp"
     },
     "python.formatting.provider": "black"
 }

@@ -310,7 +310,9 @@ class SwitchRouter(nn.Module):
         ).to(hidden_states.dtype)
         return router_probabilities, router_logits
 
-    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, hidden_states: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         forwarded_states = self.layer_norm(hidden_states)
         router_probs, _ = self._compute_router_probabilities(forwarded_states)
 
@@ -356,6 +358,7 @@ class SwitchDenseActDense(nn.Module):
         hidden_states = self.wo(self.act(self.wi(hidden_states)))
         return hidden_states
 
+
 from transformers.activations import ACT2FN
 
 # Copied from transformers.models.t5.modeling_t5.T5DenseGatedActDense with T5->SwitchTransformers
@@ -370,6 +373,7 @@ class SwitchDenseGatedActDense(nn.Module):
 
     def forward(self, hidden_states):
         return self.wo(self.act(self.wi_0(hidden_states)) * self.wi_1(hidden_states))
+
 
 class SwitchLayerFF(nn.Module):
     def __init__(self, config: SwitchTransformersConfig, is_gated: bool = False):
@@ -690,6 +694,96 @@ class SwitchDecoderBlock(nn.Module):
         )
 
         return decoder_hidden_states
+
+
+class SwitchEncoderDenseBlock(nn.Module):
+    def __init__(
+        self,
+        config: SwitchTransformersConfig,
+        has_relative_attention_bias=False,
+        is_gated=False,
+    ):
+        super().__init__()
+        self.block = SwitchEncoderBlock(config, has_relative_attention_bias)
+        self.mlp = SwitchLayerFF(config, is_gated)
+
+    def forward(self, hidden_states, position_bias):
+        hidden_states = self.block(hidden_states, position_bias)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states
+
+
+class SwitchDecoderDenseBlock(nn.Module):
+    def __init__(
+        self,
+        config: SwitchTransformersConfig,
+        has_relative_attention_bias=False,
+        is_gated=False,
+    ):
+        super().__init__()
+        self.block = SwitchDecoderBlock(config, has_relative_attention_bias)
+        self.mlp = SwitchLayerFF(config, is_gated)
+
+    def forward(
+        self,
+        decoder_hidden_states,
+        encoder_hidden_states,
+        decoder_position_bias,
+        encoder_decoder_position_bias,
+    ):
+        decoder_hidden_states = self.block(
+            decoder_hidden_states,
+            encoder_hidden_states,
+            decoder_position_bias,
+            encoder_decoder_position_bias,
+        )
+        decoder_hidden_states = self.mlp(decoder_hidden_states)
+        return decoder_hidden_states
+
+
+class SwitchEncoderSparseBlock(nn.Module):
+    def __init__(
+        self,
+        config: SwitchTransformersConfig,
+        has_relative_attention_bias=False,
+    ):
+        super().__init__()
+        self.block = SwitchEncoderBlock(config, has_relative_attention_bias)
+        self.router = SwitchRouter(config)
+
+    def forward(self, hidden_states, position_bias):
+        hidden_states = self.block(hidden_states, position_bias)
+        forwarded_states, expert_index, router_probs = self.router(hidden_states)
+        return hidden_states, forwarded_states, expert_index, router_probs
+
+
+class SwitchDecoderSparseBlock(nn.Module):
+    def __init__(
+        self,
+        config: SwitchTransformersConfig,
+        has_relative_attention_bias=False,
+    ):
+        super().__init__()
+        self.block = SwitchDecoderBlock(config, has_relative_attention_bias)
+        self.router = SwitchRouter(config)
+
+    def forward(
+        self,
+        decoder_hidden_states,
+        encoder_hidden_states,
+        decoder_position_bias,
+        encoder_decoder_position_bias,
+    ):
+        decoder_hidden_states = self.block(
+            decoder_hidden_states,
+            encoder_hidden_states,
+            decoder_position_bias,
+            encoder_decoder_position_bias,
+        )
+        forwarded_states, expert_index, router_probs = self.router(
+            decoder_hidden_states
+        )
+        return decoder_hidden_states, forwarded_states, expert_index, router_probs
 
 
 class SwitchSparseMLP(nn.Module):
